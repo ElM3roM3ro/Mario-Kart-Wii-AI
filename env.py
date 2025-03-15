@@ -1,128 +1,180 @@
-import sys
 import time
 import collections
+import sys
+sys.path.append(r"F:\Python\3.12.0\Lib\site-packages")
 import numpy as np
 from PIL import Image
+import torch
+from multiprocessing import shared_memory
 
-# If needed, append your site-packages path so Pillow etc. is found:
-# sys.path.append(r"F:\Python\3.12.0\Lib\site-packages")
+try:
+    from dolphin import event, controller, memory, savestate
+except ImportError:
+    print("Dolphin modules not found. Using dummy objects for development.")
+    class Dummy:
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: None
+    event = Dummy()
+    controller = Dummy()
+    memory = Dummy()
+    savestate = Dummy()
 
-from dolphin import event, controller
+# Parameters for shared memory
+Ymem = 78
+Xmem = 94  
+# Shared memory format (row 0):
+# [Dolphin timestep, Emulator timestep, action, reward, terminal, speed, lap_progress]
+# Rows 1: state (downsampled image data)
+shm_name = 'dolphin_shared'
+data = np.zeros((Ymem + 1, Xmem), dtype=np.float32)
+try:
+    shm = shared_memory.SharedMemory(create=True, size=data.nbytes, name=shm_name)
+    print("env.py: Created new shared memory.")
+except FileExistsError:
+    shm = shared_memory.SharedMemory(create=False, name=shm_name)
+    print("env.py: Attached to existing shared memory.")
+shm_array = np.ndarray(data.shape, dtype=data.dtype, buffer=shm.buf)
+shm_array[:] = data[:]
 
-class MarioKartDolphinEnv:
-    """
-    Environment that:
-     - Receives frames from Dolphin via callback
-     - Converts each frame to 128x128 grayscale
-     - Stacks 4 frames
-     - Defines a discrete action set for Time Trials
-    """
-    def __init__(self, target_width=128, target_height=128):
-        self.target_width = target_width
-        self.target_height = target_height
+target_width = 128
+target_height = 128
+frame_buffer = collections.deque(maxlen=4)
 
-        # We'll keep the last 4 grayscale frames, each shape (128,128)
-        self.frame_buffer = collections.deque(maxlen=4)
+actions = [
+    {"A": True, "StickX": 0.0},
+    {"A": True, "StickX": -0.6},
+    {"A": True, "StickX": 0.6},
+    {"A": True, "R": True, "StickX": -0.3},
+    {"A": True, "R": True, "StickX": 0.3},
+    {"A": True, "R": True, "StickX": -0.6},
+    {"A": True, "R": True, "StickX": 0.6},
+    {"A": True, "R": True, "StickX": -1.0},
+    {"A": True, "R": True, "StickX": 1.0},
+    {"A": True, "Up": True},
+    {"A": True, "X": True},
+]
 
-        # Subscribe to Dolphin's frame-drawn event
-        event.on_framedrawn(self.on_framedrawn)
+current_action = 0  
+timestep = 0        
 
-        # Discrete action set for Time Trials (example GC mapping).
-        # You can tweak stick angles for 'soft', 'medium', 'hard' drift, etc.
-        self.actions = [
-            {"A": True, "StickX": 0.0},          # 0: Accelerate straight
-            {"A": True, "StickX": -0.6},         # 1: Turn Left + Accelerate
-            {"A": True, "StickX": 0.6},          # 2: Turn Right + Accelerate
-            {"A": True, "R": True, "StickX": -0.3},  # 3: Drift + Soft Left
-            {"A": True, "R": True, "StickX": 0.3},   # 4: Drift + Soft Right
-            {"A": True, "R": True, "StickX": -0.6},  # 5: Drift + Medium Left
-            {"A": True, "R": True, "StickX": 0.6},   # 6: Drift + Medium Right
-            {"A": True, "R": True, "StickX": -1.0},  # 7: Drift + Hard Left
-            {"A": True, "R": True, "StickX": 1.0},   # 8: Drift + Hard Right
-            {"A": True, "Up": True},                 # 9: Wheelie (may depend on config)
-            {"A": True, "X": True},                  # 10: Use Mushroom (Item)
-        ]
-        self.action_space_size = len(self.actions)
+last_position = None
+last_lap_progress = None
+low_speed_counter = 0  
 
-        # Internal counters
-        self.current_step = 0
-        self.max_steps = 2000  # end an episode after these many steps (placeholder)
+POS_BASE = 0x809C2EF8
+OFF_X = 0x40
+OFF_Y = 0x44
+OFF_Z = 0x48
 
-    def on_framedrawn(self, width: int, height: int, data: bytes):
-        """
-        Callback from Dolphin each time it draws a frame.
-        Convert raw bytes -> 128x128 grayscale np array -> store in frame_buffer.
-        """
-        # Convert raw data to a PIL image
-        image = Image.frombytes('RGB', (width, height), data, 'raw')
-        # Grayscale and resize
-        image = image.convert("L").resize(
-            (self.target_width, self.target_height),
-            Image.BILINEAR
-        )
-        # shape: (128,128) as a NumPy array
-        frame_array = np.array(image)
-        self.frame_buffer.append(frame_array)
+LAP_PROGRESS_ADDR = 0x809BD730 + 0xF8  
 
-    def reset(self):
-        """
-        Reset environment state, clear buffer, wait for at least 4 frames, return stacked frames.
-        Possibly also do a savestate load or reposition the kart, etc.
-        """
-        self.current_step = 0
-        self.frame_buffer.clear()
+CURRENT_LAP_ADDR = 0x809BD730 + 0x111  
+MAX_LAP_ADDR = 0x809BD730 + 0x112      
 
-        # Ensure we release all buttons at reset
+def process_frame(width, height, data_bytes):
+    try:
+        image = Image.frombytes('RGB', (width, height), data_bytes, 'raw')
+    except Exception as e:
+        print("env.py: Error in Image.frombytes:", e)
+        return None
+    image = image.convert("L").resize((target_width, target_height), Image.BILINEAR)
+    frame = np.array(image)
+    return frame
+
+def on_framedrawn(width: int, height: int, data_bytes: bytes):
+    frame = process_frame(width, height, data_bytes)
+    if frame is None:
+        print("env.py: Frame processing failed.")
+        return
+    frame_buffer.append(frame)
+    if len(frame_buffer) < 4:
+        return
+    state_img = np.stack(list(frame_buffer), axis=0)
+    reward, terminal, speed, lap_progress = compute_reward_debug()
+    global timestep
+    timestep += 1
+    print(f"env.py: t={timestep}, Reward={reward}, Terminal={terminal}, Speed={speed}, LapProgress={lap_progress}")
+    shm_array[0, 0] = timestep
+    shm_array[0, 1] = timestep
+    shm_array[0, 2] = current_action
+    shm_array[0, 3] = reward
+    shm_array[0, 4] = terminal
+    shm_array[0, 5] = speed
+    shm_array[0, 6] = lap_progress
+    from PIL import Image
+    pil_state = Image.fromarray(state_img[0])
+    pil_state = pil_state.resize((Xmem, Ymem), Image.BILINEAR)
+    state_down = np.array(pil_state)
+    shm_array[1:, :] = state_down
+
+event.on_framedrawn(on_framedrawn)
+
+def read_game_state():
+    try:
+        pos_x = memory.read_f32(POS_BASE + OFF_X)
+        pos_y = memory.read_f32(POS_BASE + OFF_Y)
+        pos_z = memory.read_f32(POS_BASE + OFF_Z)
+        lap_progress = memory.read_f32(LAP_PROGRESS_ADDR)
+        current_lap = int(memory.read_f32(CURRENT_LAP_ADDR))
+        max_lap = int(memory.read_f32(MAX_LAP_ADDR))
+        return {
+            'position': (pos_x, pos_y, pos_z),
+            'lap_progress': lap_progress,
+            'current_lap': current_lap,
+            'max_lap': max_lap
+        }
+    except Exception as e:
+        print("env.py: Error reading game state:", e)
+        return None
+
+def compute_reward_debug():
+    global last_position, last_lap_progress, low_speed_counter
+    state = read_game_state()
+    if state is None:
+        return 0.0, 0.0, 0.0, 0.0
+    current_position = state['position']
+    current_lap_progress = state['lap_progress']
+    current_lap = state['current_lap']
+    max_lap = state['max_lap']
+    speed = 0.0
+    if last_position is not None:
+        dx = current_position[0] - last_position[0]
+        dy = current_position[1] - last_position[1]
+        dz = current_position[2] - last_position[2]
+        speed = (dx**2 + dy**2 + dz**2) ** 0.5
+    progress_reward = 0.0
+    if last_lap_progress is not None:
+        if current_lap > 0 and current_lap > int(memory.read_f32(CURRENT_LAP_ADDR)):
+            progress_reward = (1.0 - last_lap_progress + current_lap_progress) * 100.0
+        else:
+            progress_reward = max(0.0, (current_lap_progress - last_lap_progress)) * 100.0
+    last_position = current_position
+    last_lap_progress = current_lap_progress
+    SPEED_THRESHOLD = 0.05
+    if speed < SPEED_THRESHOLD:
+        low_speed_counter += 1
+    else:
+        low_speed_counter = 0
+    low_speed_penalty = -10.0 if low_speed_counter >= 10 else 0.0
+    race_complete_bonus = 0.0
+    terminal = 0.0
+    if current_lap >= max_lap and current_lap_progress > 0.99:
+        race_complete_bonus = 10.0
+        terminal = 1.0
+    total_reward = progress_reward + low_speed_penalty + race_complete_bonus
+    return float(total_reward), terminal, speed, current_lap_progress
+
+def apply_action(action_index):
+    if 0 <= action_index < len(actions):
+        controller.set_gc_buttons(0, actions[action_index])
+    else:
         controller.set_gc_buttons(0, {})
 
-        # Wait for frames to accumulate
-        time.sleep(1.0)
-        while len(self.frame_buffer) < 4:
-            time.sleep(0.1)
-
-        return self._get_stacked_frames()
-
-    def step(self, action_idx):
-        """
-        Execute the chosen action on the GC controller for one frame,
-        then return (obs, reward, done, info).
-        """
-        # 1) Apply the chosen action, if valid
-        if 0 <= action_idx < len(self.actions):
-            gc_input = self.actions[action_idx]
-        else:
-            gc_input = {}
-        controller.set_gc_buttons(0, gc_input)
-
-        # 2) Wait ~ one frame
+import threading
+def main_loop():
+    while True:
         time.sleep(0.03)
+        apply_action(current_action)
 
-        # 3) Construct the observation
-        obs = self._get_stacked_frames()
-
-        # 4) Placeholder reward logic
-        reward = 0.0
-
-        # 5) Check if done
-        self.current_step += 1
-        done = (self.current_step >= self.max_steps)
-
-        info = {}
-        return obs, reward, done, info
-
-    def _get_stacked_frames(self):
-        """
-        Return a NumPy array of shape (4, 128, 128) in grayscale.
-        If fewer than 4 frames available, replicate earliest.
-        """
-        if len(self.frame_buffer) < 4:
-            frames = list(self.frame_buffer)
-            while len(frames) < 4:
-                frames.insert(0, frames[0])
-        else:
-            frames = list(self.frame_buffer)
-
-        stacked = np.stack(frames, axis=0)  # shape (4, 128, 128)
-
-        # If you want float in [0,1], do: stacked = stacked.astype(np.float32) / 255.0
-        return stacked
+if __name__ == "__main__":
+    threading.Thread(target=main_loop, daemon=True).start()
