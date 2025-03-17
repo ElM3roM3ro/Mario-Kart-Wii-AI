@@ -19,7 +19,7 @@ except ImportError:
     memory = Dummy()
     savestate = Dummy()
 
-# Parameters for shared memory
+# Parameters for shared memory 
 Ymem = 78
 Xmem = 94  
 # Shared memory format (row 0):

@@ -112,7 +112,7 @@ def train(num_episodes=100000):
         v_max=6.0,
         num_atoms=51,
         target_update_interval=1000,
-        device='cuda'  # adjust as needed
+        device='cuda'  # adjust as needed 
     )
     
     max_steps_per_episode = 2000
