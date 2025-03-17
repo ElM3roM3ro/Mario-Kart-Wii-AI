@@ -105,7 +105,7 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
     shm_array[0, 0] = timestep
     shm_array[0, 1] = timestep
     # Store the current action index.
-    shm_array[0, 2] = current_action
+    #shm_array[0, 2] = current_action
     shm_array[0, 3] = reward
     shm_array[0, 4] = terminal
     shm_array[0, 5] = speed
@@ -192,6 +192,7 @@ import threading
 def main_loop():
     while True:
         time.sleep(0.03)
+        current_action = int(shm_array[0, 2])
         apply_action(current_action)
 
 if __name__ == "__main__":
