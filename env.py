@@ -40,18 +40,27 @@ target_width = 128
 target_height = 128
 frame_buffer = collections.deque(maxlen=4)
 
-actions = [
-    {"A": True, "StickX": 0.0},
-    {"A": True, "StickX": -0.6},
-    {"A": True, "StickX": 0.6},
-    {"A": True, "R": True, "StickX": -0.3},
-    {"A": True, "R": True, "StickX": 0.3},
-    {"A": True, "R": True, "StickX": -0.6},
-    {"A": True, "R": True, "StickX": 0.6},
-    {"A": True, "R": True, "StickX": -1.0},
-    {"A": True, "R": True, "StickX": 1.0},
-    {"A": True, "Up": True},
-    {"A": True, "X": True},
+# --- Translated Actions for Wii Controllers ---
+# Wii Remote actions: only two states are needed.
+wiimote_actions = [
+    {"A": True, "B": False},
+    {"A": True, "B": True},
+]
+
+# Nunchuck actions: steering is based solely on StickX.
+# StickY is neutral (0.0) when going straight.
+nunchuck_actions = [
+    {"StickX": 0.0, "StickY": 0.0, "Z": False},   # Index 1: Straight.
+    {"StickX": -0.6, "StickY": 0.0, "Z": False},   # Index 2: Steer left.
+    {"StickX": 0.6, "StickY": 0.0, "Z": False},    # Index 3: Steer right.
+    {"StickX": -0.3, "StickY": 0.0, "Z": False},   # Index 4: Slight left (drift).
+    {"StickX": 0.3, "StickY": 0.0, "Z": False},    # Index 5: Slight right (drift).
+    {"StickX": -0.6, "StickY": 0.0, "Z": False},   # Index 6: More left (drift).
+    {"StickX": 0.6, "StickY": 0.0, "Z": False},    # Index 7: More right (drift).
+    {"StickX": -1.0, "StickY": 0.0, "Z": False},   # Index 8: Full left (drift).
+    {"StickX": 1.0, "StickY": 0.0, "Z": False},    # Index 9: Full right (drift).
+    {"StickX": 0.0, "StickY": 0.0, "Z": False},    # Index 10: Neutral (for Up).
+    {"StickX": 0.0, "StickY": 0.0, "Z": True},     # Index 11: Neutral with item usage.
 ]
 
 current_action = 0  
@@ -67,7 +76,6 @@ OFF_Y = 0x44
 OFF_Z = 0x48
 
 LAP_PROGRESS_ADDR = 0x809BD730 + 0xF8  
-
 CURRENT_LAP_ADDR = 0x809BD730 + 0x111  
 MAX_LAP_ADDR = 0x809BD730 + 0x112      
 
@@ -96,12 +104,12 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
     print(f"env.py: t={timestep}, Reward={reward}, Terminal={terminal}, Speed={speed}, LapProgress={lap_progress}")
     shm_array[0, 0] = timestep
     shm_array[0, 1] = timestep
+    # Store the current action index.
     shm_array[0, 2] = current_action
     shm_array[0, 3] = reward
     shm_array[0, 4] = terminal
     shm_array[0, 5] = speed
     shm_array[0, 6] = lap_progress
-    from PIL import Image
     pil_state = Image.fromarray(state_img[0])
     pil_state = pil_state.resize((Xmem, Ymem), Image.BILINEAR)
     state_down = np.array(pil_state)
@@ -165,10 +173,20 @@ def compute_reward_debug():
     return float(total_reward), terminal, speed, current_lap_progress
 
 def apply_action(action_index):
-    if 0 <= action_index < len(actions):
-        controller.set_gc_buttons(0, actions[action_index])
+    # For the Wii remote, if the action index is between 4 and 9, use the drift state.
+    if 4 <= action_index <= 9:
+        remote_action = wiimote_actions[1]
     else:
-        controller.set_gc_buttons(0, {})
+        remote_action = wiimote_actions[0]
+    
+    # For the nunchuck, use the corresponding action from the nunchuck_actions list if available.
+    if 0 <= action_index < len(nunchuck_actions):
+        nunchuck_action = nunchuck_actions[action_index]
+    else:
+        nunchuck_action = {"StickX": 0.0, "StickY": 0.0, "Z": False}
+    
+    controller.set_wiimote_buttons(0, remote_action)
+    controller.set_wii_nunchuk_buttons(0, nunchuck_action)
 
 import threading
 def main_loop():

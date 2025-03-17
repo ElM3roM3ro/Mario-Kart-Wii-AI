@@ -94,7 +94,7 @@ def preprocess_state(state):
     stacked = np.stack([state_resized] * 4, axis=0)  # shape (4,128,128)
     return torch.from_numpy(stacked).float()
 
-def train(num_episodes=10):
+def train(num_episodes=100000):
     print("Starting training...")
     launch_dolphin()
     
@@ -159,4 +159,4 @@ def train(num_episodes=10):
     print("Training finished.")
 
 if __name__ == "__main__":
-    train(num_episodes=10)
+    train(num_episodes=100000)
