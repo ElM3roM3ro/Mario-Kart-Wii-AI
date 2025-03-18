@@ -2,7 +2,11 @@ import time
 import collections
 import sys
 import random
-sys.path.append(r"F:\Python\3.12.0\Lib\site-packages")
+user = "Zach"
+if user == "Nolan":
+    sys.path.append(r"C:\Users\nolan\AppData\Local\Programs\Python\Python312\Lib\site-packages") # Nolan's path
+elif user == "Zach":
+    sys.path.append(r"F:\Python\3.12.0\Lib\site-packages") # Zach's path
 import numpy as np
 from PIL import Image
 import torch
@@ -44,8 +48,8 @@ frame_buffer = collections.deque(maxlen=4)
 
 # --- Translated Actions for Wii Controllers ---
 wiimote_actions = [
-    {"A": True, "B": False},   # Default remote state (A pressed)
-    {"A": True, "B": True},    # Alternate remote state (for drift, etc.)
+    {"B": False},   # Default remote state (A pressed)
+    {"B": True},    # Alternate remote state (for drift, etc.)
 ]
 nunchuck_actions = [
     {"StickX": 0.0, "StickY": 0.0, "Z": False},   # Index 0: Straight.
@@ -207,15 +211,18 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
     shm_array[1:, :] = state_down
 
     # New low-speed reset condition:
-    if speed < 50:
+    if speed < 60:
         low_speed_counter += 1
     else:
         low_speed_counter = 0
 
-    if low_speed_counter >= 720 and not resetting:
+    if low_speed_counter >= 60 and timestep > 300 and not resetting:
         print("Low speed detected for 720 consecutive frames. Initiating environment reset...")
         low_speed_counter = 0  # Reset the counter after triggering the reset.
         resetting = True
+        penalty = 25
+        reward -= penalty
+        shm_array[0, 3] = reward
         reset_environment(initial=False)
         return
 
@@ -224,51 +231,50 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
         print("Terminal condition reached. Initiating environment reset...")
         resetting = True
         reset_environment(initial=False)
+    
+    if timestep > 145:
+        controller.set_wiimote_buttons(0, {"A":True})
 
 event.on_framedrawn(on_framedrawn)
 
 def apply_action(action_index):
-    global current_wiimote_state, timestep
-
+    global timestep, last_action
     last_action = action_index
 
+    # --- Special case for action 12 ---
     if action_index == 12:
-        # For action 12, after timestep 300, hold A while swinging.
-        if timestep > 300:
-            new_wiimote_state = {"A": True, "B": False}
-        else:
-            new_wiimote_state = {"A": False, "B": False}
-        current_wiimote_state = new_wiimote_state.copy()
-        controller.set_wiimote_buttons(0, current_wiimote_state)
+        # Temporarily disable A while performing the swing.
+        # (We also update B if needed; here we use B: False.)
+        #controller.set_wiimote_buttons(0, {"A": False, "B": False})
+        controller.set_wiimote_swing(0, 0.0, 1.0, 0.0, 0.5, 16.0, 2.0, 0.0)
+        nunchuck_action = {"StickX": 0.0, "StickY": 0.0, "Z": False}
+        controller.set_wii_nunchuk_buttons(0, nunchuck_action)
+        # Schedule re-enabling A after a short delay.
+        controller.set_wiimote_buttons(0, {"A": True})
+        return
+
+    # --- Special case for action 11 (combined wheelie + vertical swing) ---
+    if action_index == 11:
+        # Do the swing command while leaving A enabled (A remains True from reset).
+        controller.set_wiimote_buttons(0, {"B": False})
         controller.set_wiimote_swing(0, 0.0, 1.0, 0.0, 0.5, 16.0, 2.0, 0.0)
         nunchuck_action = {"StickX": 0.0, "StickY": 0.0, "Z": False}
         controller.set_wii_nunchuk_buttons(0, nunchuck_action)
         return
-    else:
-        # For all other actions, we want A to be held.
-        if action_index == 11:
-            # Action 11: Combined wheelie + vertical swing.
-            new_wiimote_state = {"A": True, "B": False}
-            controller.set_wiimote_buttons(0, new_wiimote_state)
-            controller.set_wiimote_swing(0, 0.0, 1.0, 0.0, 0.5, 16.0, 2.0, 0.0)
-            nunchuck_action = {"StickX": 0.0, "StickY": 0.0, "Z": False}
-            controller.set_wii_nunchuk_buttons(0, nunchuck_action)
-            current_wiimote_state = new_wiimote_state.copy()
-            return
-        else:
-            # For all other actions, force A to be True.
-            if 4 <= action_index <= 9:
-                new_wiimote_state = wiimote_actions[1].copy()  # A is True, B is True.
-            else:
-                new_wiimote_state = wiimote_actions[0].copy()  # A is True, B is False.
-            current_wiimote_state = new_wiimote_state.copy()
-            controller.set_wiimote_buttons(0, current_wiimote_state)
 
-            if 0 <= action_index < len(nunchuck_actions):
-                nunchuck_action = nunchuck_actions[action_index]
-            else:
-                nunchuck_action = {"StickX": 0.0, "StickY": 0.0, "Z": False}
-            controller.set_wii_nunchuk_buttons(0, nunchuck_action)
+    # --- For all other actions, only update B (A remains True) ---
+    # For drifting actions (indices 4 through 9), we want B set to True.
+    if 4 <= action_index <= 9:
+        controller.set_wiimote_buttons(0, {"B": True})
+    else:
+        controller.set_wiimote_buttons(0, {"B": False})
+
+    # Update the nunchuck based on the action.
+    if 0 <= action_index < len(nunchuck_actions):
+        nunchuck_action = nunchuck_actions[action_index]
+    else:
+        nunchuck_action = {"StickX": 0.0, "StickY": 0.0, "Z": False}
+    controller.set_wii_nunchuk_buttons(0, nunchuck_action)
 
 def reset_environment(initial=False):
     """
@@ -312,6 +318,8 @@ def reset_environment(initial=False):
     print("Environment reset complete.")
     # Allow further resets.
     resetting = False
+
+    controller.set_wiimote_buttons(0, {"A": True})
 
 def main_loop():
     while True:

@@ -12,13 +12,31 @@ Xmem = 94  # Must include extra debug columns (col 5: speed, col 6: lap_progress
 shm_name = 'dolphin_shared'
 data_shape = (Ymem + 1, Xmem)
 
+paths = {
+    "dolphin_path": r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\dolphin-x64-framedrawn-stable\Dolphin.exe",
+    "savestate_path": r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_delfino_savestate.sav",
+    "script_path": r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\env.py",
+    "game_path": r"C:\Users\nolan\source\repos\dolphin\Source\Core\DolphinQt\MarioKart(Compress).iso",
+}
+
+user = "Zach"
+if user == "Nolan":
+    paths["dolphin_path"] = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\dolphin-x64-framedrawn-stable\Dolphin.exe"
+    paths["script_path"] = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\env.py"
+    paths["savestate_path"] = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_delfino_savestate.sav"
+    paths["game_path"] = r"C:\Users\nolan\source\repos\dolphin\Source\Core\DolphinQt\MarioKart(Compress).iso"
+elif user == "Zach":
+    paths["dolphin_path"] = r"F:\DolphinEmuFork_src\dolphin\Binary\x64\Dolphin.exe"
+    paths["script_path"] = r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\env.py"
+    paths["savestate_path"] = r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino_savestate.sav"
+    paths["game_path"] = r"E:\Games\Dolphin Games\MarioKart(Compress).iso"
+
 def launch_dolphin():
     # Update these paths to match your system
-    dolphin_path = r"F:\DolphinEmuFork_src\dolphin\Binary\x64\Dolphin.exe"  # Path to Dolphin.exe
-    script_path = r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\env.py"         # Path to env.py script
-    savestate_path = r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino_savestate.sav"  # Savestate file at countdown
-    game_path = r"E:\Games\Dolphin Games\MarioKart(Compress).iso"                # Your game file
-
+    dolphin_path = paths["dolphin_path"]  # Path to Dolphin.exe
+    script_path = paths["script_path"]       # Path to env.py script
+    savestate_path = paths["savestate_path"]  # Savestate file at countdown
+    game_path = paths["game_path"]                 # Your game file
     # Build the command string without the 'cd' part.
     cmd = (
         f'"{dolphin_path}" --no-python-subinterpreters '
