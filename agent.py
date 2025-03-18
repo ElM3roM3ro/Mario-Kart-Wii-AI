@@ -12,7 +12,7 @@ class NoisyLinear(nn.Module):
     """
     Factorized NoisyNet layer (Fortunato et al. 2018)
     """
-    def __init__(self, in_features, out_features, sigma_init=0.5):
+    def __init__(self, in_features, out_features, sigma_init=0.1):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -138,7 +138,7 @@ class RainbowDQN:
     def __init__(
         self,
         state_shape=(4, 128, 128),
-        num_actions=11,
+        num_actions=13,
         num_atoms=51,
         v_min=-2.0,
         v_max=6.0,

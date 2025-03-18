@@ -14,10 +14,10 @@ data_shape = (Ymem + 1, Xmem)
 
 def launch_dolphin():
     # Update these paths to match your system
-    dolphin_path = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\dolphin-x64-framedrawn-stable\Dolphin.exe"  # Path to Dolphin.exe
-    script_path = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\env.py"      # Path to env.py script
-    savestate_path = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\delfino_savestate.sav"  # Savestate file at countdown
-    game_path = r"C:\Users\nolan\source\repos\dolphin\Source\Core\DolphinQt\MarioKart(Compress).iso"                # Your game file
+    dolphin_path = r"F:\DolphinEmuFork_src\dolphin\Binary\x64\Dolphin.exe"  # Path to Dolphin.exe
+    script_path = r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\env.py"         # Path to env.py script
+    savestate_path = r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino_savestate.sav"  # Savestate file at countdown
+    game_path = r"E:\Games\Dolphin Games\MarioKart(Compress).iso"                # Your game file
 
     # Build the command string without the 'cd' part.
     cmd = (
@@ -26,7 +26,9 @@ def launch_dolphin():
         f'--save_state="{savestate_path}" '
         f'--exec="{game_path}"'
     )
-    print(f"Launching Dolphin with command: {cmd}")
+    
+    print("Launching Dolphin with command:")
+    print(cmd)
     
     subprocess.Popen(cmd, shell=True)
     print("Launched Dolphin with savestate loaded.")
@@ -63,7 +65,7 @@ def read_shared_state(shm_array):
     while True:
         time.sleep(0.01)
         t = shm_array[0, 0]
-        if t > t0:
+        if t != t0:
             break
         timeout += 1
         if timeout % 1000 == 0:
@@ -101,7 +103,7 @@ def train(num_episodes=100000):
     print("Initializing agent...")
     agent = RainbowDQN(
         state_shape=(4, 128, 128),
-        num_actions=11,
+        num_actions=13,
         lr=1e-4,
         buffer_size=50000,
         batch_size=32,
