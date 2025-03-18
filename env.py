@@ -80,6 +80,9 @@ last_fps_time = time.time()
 resetting = False
 
 # Memory addresses for game state.
+MINUTES_ADDR = 0x80e48df9
+SECONDS_ADDR = 0x80e48dfa
+MILLISECONDS_ADDR = 0x80e48dfc
 SPEED_ADDR = 0x80fad2c4       # or 0x80fad2c8, adjust as needed
 LAP_PROGRESS_ADDR = 0x80e48d3c # or 0x80e48d38, adjust as needed
 CURRENT_LAP_ADDR = 0x80e96428
@@ -97,68 +100,111 @@ def process_frame(width, height, data_bytes):
     image = image.convert("L").resize((target_width, target_height), Image.BILINEAR)
     return np.array(image)
 
+# Global variables for tracking progress and time.
+last_lap_progress = None
+last_elapsed_time = None  # New global to track time from the previous step.
+
+def read_time():
+    """
+    Reads the in-game timer values (minutes, seconds, and milliseconds) and computes
+    the elapsed time in seconds.
+    Note: ms is multiplied by 100 per your comment; adjust if needed.
+    """
+    try:
+        minutes = memory.read_f32(MINUTES_ADDR)
+        seconds = memory.read_f32(SECONDS_ADDR)
+        ms = memory.read_f32(MILLISECONDS_ADDR) * 100  # Adjust if necessary.
+        # Convert ms to seconds.
+        elapsed_time = minutes * 60 + seconds + ms / 1000.0
+        return elapsed_time
+    except Exception as e:
+        print("Error reading time:", e)
+        return 0.0
+
+# --- Configurable Parameters ---
+PROGRESS_UNIT = 0.1            # Reward unit per 0.1 progress increment.
+SPEED_SCALE = 50.0             # Scale factor for speed in progress reward.
+SPEED_THRESHOLD = 80.0         # Threshold for bonus speed reward.
+TERMINAL_BONUS = 10.0          # Bonus reward when lap_progress reaches the terminal condition.
+DRIFTING_PENALTY = 1.0         # Penalty for drifting at low speed.
+DRIFT_SPEED_THRESHOLD = 45.0   # Speed below which drifting is penalized.
+NORMALIZATION_FACTOR = 1000.0   # Adjust as needed (was commented as 800, so confirm the intended scale).
+LAMBDA = 1.0                 # Scaling factor for lap progress in potential.
+MU = 0.5                     # Scaling factor for elapsed time in potential.
+
+# --- Modular Reward Components ---
+
+def compute_progress_reward(lap_progress, last_lap_progress, speed):
+    """Calculate the reward based on lap progress increments, bonus for whole numbers, and speed bonus."""
+    if last_lap_progress is None:
+        return 0.0
+    lap_diff = max(0.0, lap_progress - last_lap_progress)
+    progress_reward = (lap_diff / PROGRESS_UNIT) * (speed / SPEED_SCALE)
+    
+    # Bonus for crossing whole number boundaries.
+    whole_bonus = 0
+    if last_lap_progress is not None:
+        last_whole = int(last_lap_progress)
+        current_whole = int(lap_progress)
+        if current_whole > last_whole:
+            whole_bonus = current_whole - last_whole
+            
+    # Additional bonus for speed above threshold.
+    speed_bonus = (speed - SPEED_THRESHOLD) if speed >= SPEED_THRESHOLD else 0
+    return progress_reward + whole_bonus + speed_bonus
+
+def compute_shaping_reward(lap_progress, elapsed_time, last_lap_progress, last_elapsed_time):
+    """Compute the potential-based shaping reward."""
+    phi_new = LAMBDA * lap_progress - MU * elapsed_time
+    if last_lap_progress is None or last_elapsed_time is None:
+        phi_old = 0.0
+    else:
+        phi_old = LAMBDA * last_lap_progress - MU * last_elapsed_time
+    return phi_new - phi_old
+
 def compute_reward():
     """
-    New reward function:
-      - Rewards small increments in lap progress (every 0.1) scaled by speed.
-      - Awards a bonus for crossing whole number lap progress boundaries.
-      - Provides an additional bonus if speed is above 50 (none if below).
-      - Marks terminal when lap progress >= 4.
+    Computes a normalized reward including:
+      - Progress-based reward.
+      - Potential-based shaping.
+      - Terminal bonus and drifting penalty.
     """
-    global last_lap_progress
+    global last_lap_progress, last_elapsed_time, last_action
+
     state = read_game_state()
     if state is None:
         return 0.0, 0.0, 0.0, 0.0
 
     speed = state['speed']
     lap_progress = state['lap_progress']
-    reward = 0.0
+    elapsed_time = read_time()
 
-    # Calculate lap progress difference; only consider positive progress.
-    if last_lap_progress is None:
-        lap_diff = 0.0
-    else:
-        lap_diff = max(0.0, lap_progress - last_lap_progress)
+    # --- Progress Reward ---
+    base_reward = compute_progress_reward(lap_progress, last_lap_progress, speed)
+    
+    # --- Potential-Based Shaping ---
+    shaping_reward = compute_shaping_reward(lap_progress, elapsed_time, last_lap_progress, last_elapsed_time)
+    
+    raw_reward = base_reward + shaping_reward
 
-    # Reward for small increments in lap progress:
-    # Every 0.1 progress gives a base reward of 10, scaled by (speed / 50).
-    progress_reward = (lap_diff / 0.1) * 10 * (speed / 50)
-
-    # Bonus for crossing whole number boundaries in lap progress.
-    whole_progress_bonus = 0
-    if last_lap_progress is not None:
-        last_whole = int(last_lap_progress)
-        current_whole = int(lap_progress)
-        if current_whole > last_whole:
-            # Award 200 points for each whole number passed.
-            whole_progress_bonus = (current_whole - last_whole) * 200
-
-    # Additional bonus for speed above 50.
-    speed_bonus = 0
-    if speed >= 45:
-        # For every point above 50, add 2 extra points.
-        speed_bonus = (speed - 45) * 2
-
-    # Sum up the reward.
-    reward = progress_reward + whole_progress_bonus + speed_bonus
-
-    # Terminal condition: if lap progress reaches 4, grant a huge bonus and signal termination.
+    # --- Terminal Bonus ---
     terminal = 0.0
     if lap_progress >= 4:
-        reward += 1000  # Big reward for completing the lap.
+        raw_reward += TERMINAL_BONUS
         terminal = 1.0
-    
-    # --- New drifting penalty ---
-    # Assume drifting actions are indices 3, 4, 5, 6, 7, and 8.
+
+    # --- Drifting Penalty ---
     drifting_actions = {3, 4, 5, 6, 7, 8}
-    if last_action in drifting_actions and speed < 45:
-        penalty = 10  # Negative penalty for drifting at low speed.
-        reward -= penalty
+    if last_action in drifting_actions and speed < DRIFT_SPEED_THRESHOLD:
+        raw_reward -= DRIFTING_PENALTY
 
-    # Update last_lap_progress for the next call.
+    # Update last progress and time for the next frame.
     last_lap_progress = lap_progress
+    last_elapsed_time = elapsed_time
 
-    return float(reward), terminal, speed, lap_progress
+    normalized_reward = raw_reward / NORMALIZATION_FACTOR
+
+    return float(normalized_reward), terminal, speed, lap_progress
 
 def read_game_state():
     try:
@@ -176,8 +222,11 @@ def read_game_state():
         print("env.py: Error reading game state:", e)
         return None
 
+# Global variable to hold the last selected action.
+held_action = 0
+
 def on_framedrawn(width: int, height: int, data_bytes: bytes):
-    global timestep, fps_counter, last_fps_time, resetting, low_speed_counter
+    global timestep, fps_counter, last_fps_time, resetting, low_speed_counter, held_action
     frame = process_frame(width, height, data_bytes)
     if frame is None:
         print("env.py: Frame processing failed.")
@@ -211,16 +260,16 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
     shm_array[1:, :] = state_down
 
     # New low-speed reset condition:
-    if speed < 60:
+    if speed < 40:
         low_speed_counter += 1
     else:
         low_speed_counter = 0
 
-    if low_speed_counter >= 60 and timestep > 300 and not resetting:
+    if low_speed_counter >= 40 and timestep > 360 and not resetting:
         print("Low speed detected for 720 consecutive frames. Initiating environment reset...")
         low_speed_counter = 0  # Reset the counter after triggering the reset.
         resetting = True
-        penalty = 25
+        penalty = 10
         reward -= penalty
         shm_array[0, 3] = reward
         reset_environment(initial=False)
@@ -232,8 +281,15 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
         resetting = True
         reset_environment(initial=False)
     
-    if timestep > 145:
-        controller.set_wiimote_buttons(0, {"A":True})
+    # --- Hold actions across frames ---
+    # Read the new action from shared memory.
+    new_action = int(shm_array[0, 2])
+    # Only update held_action if a new action is provided.
+    if new_action != held_action:
+        held_action = new_action
+        print(f"New action selected: {held_action}")
+    # Apply the held action every frame.
+    apply_action(held_action)
 
 event.on_framedrawn(on_framedrawn)
 
@@ -241,22 +297,26 @@ def apply_action(action_index):
     global timestep, last_action
     last_action = action_index
 
+    if action_index == 13:
+        # Do nothing
+        controller.set_wiimote_buttons(0, {"A": False, "B": False})
+        nunchuck_action = {"StickX": 0.0, "StickY": 0.0, "Z": False}
+        controller.set_wii_nunchuk_buttons(0, nunchuck_action)
+        return
     # --- Special case for action 12 ---
     if action_index == 12:
         # Temporarily disable A while performing the swing.
         # (We also update B if needed; here we use B: False.)
-        #controller.set_wiimote_buttons(0, {"A": False, "B": False})
+        controller.set_wiimote_buttons(0, {"A": False, "B": False})
         controller.set_wiimote_swing(0, 0.0, 1.0, 0.0, 0.5, 16.0, 2.0, 0.0)
         nunchuck_action = {"StickX": 0.0, "StickY": 0.0, "Z": False}
         controller.set_wii_nunchuk_buttons(0, nunchuck_action)
-        # Schedule re-enabling A after a short delay.
-        controller.set_wiimote_buttons(0, {"A": True})
         return
 
     # --- Special case for action 11 (combined wheelie + vertical swing) ---
     if action_index == 11:
         # Do the swing command while leaving A enabled (A remains True from reset).
-        controller.set_wiimote_buttons(0, {"B": False})
+        controller.set_wiimote_buttons(0, {"A":True, "B": False})
         controller.set_wiimote_swing(0, 0.0, 1.0, 0.0, 0.5, 16.0, 2.0, 0.0)
         nunchuck_action = {"StickX": 0.0, "StickY": 0.0, "Z": False}
         controller.set_wii_nunchuk_buttons(0, nunchuck_action)
@@ -265,9 +325,9 @@ def apply_action(action_index):
     # --- For all other actions, only update B (A remains True) ---
     # For drifting actions (indices 4 through 9), we want B set to True.
     if 4 <= action_index <= 9:
-        controller.set_wiimote_buttons(0, {"B": True})
+        controller.set_wiimote_buttons(0, {"A":True, "B": True})
     else:
-        controller.set_wiimote_buttons(0, {"B": False})
+        controller.set_wiimote_buttons(0, {"A":True, "B": False})
 
     # Update the nunchuck based on the action.
     if 0 <= action_index < len(nunchuck_actions):
@@ -303,7 +363,7 @@ def reset_environment(initial=False):
     while True:
         if shm_array[0, 1] == timestep:
             break
-        time.sleep(0.01)
+        #time.sleep(0.01)
 
     # Reset reward and terminal values.
     shm_array[0, 3] = 0.0  # Reward.
@@ -318,8 +378,6 @@ def reset_environment(initial=False):
     print("Environment reset complete.")
     # Allow further resets.
     resetting = False
-
-    controller.set_wiimote_buttons(0, {"A": True})
 
 def main_loop():
     while True:

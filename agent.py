@@ -35,8 +35,9 @@ class NoisyLinear(nn.Module):
         nn.init.uniform_(self.bias_mu, -bound, bound)
 
     def reset_noise(self):
-        eps_in = self._scale_noise(self.in_features)
-        eps_out = self._scale_noise(self.out_features)
+        device = self.weight_mu.device  # Ensure we use the correct device
+        eps_in = self._scale_noise(self.in_features, device)
+        eps_out = self._scale_noise(self.out_features, device)
         self.weight_epsilon = eps_out.ger(eps_in)
         self.bias_epsilon = eps_out
 
@@ -45,8 +46,8 @@ class NoisyLinear(nn.Module):
         bias = self.bias_mu + self.bias_sigma * self.bias_epsilon
         return nn.functional.linear(x, weight, bias)
 
-    def _scale_noise(self, size):
-        x = torch.randn(size)
+    def _scale_noise(self, size, device):
+        x = torch.randn(size, device=device)
         return x.sign() * x.abs().sqrt()
 
 # -------------- Dueling + Distributional Network -------------- #
@@ -56,7 +57,7 @@ class RainbowNetwork(nn.Module):
     Input: (batch, 4, 128, 128) → 4 grayscale frames.
     Output: (batch, num_actions, num_atoms)
     """
-    def __init__(self, in_channels=4, num_actions=11, num_atoms=51, hidden=256):
+    def __init__(self, in_channels=4, num_actions=14, num_atoms=51, hidden=256):
         super().__init__()
         self.num_actions = num_actions
         self.num_atoms = num_atoms
@@ -138,7 +139,7 @@ class RainbowDQN:
     def __init__(
         self,
         state_shape=(4, 128, 128),
-        num_actions=13,
+        num_actions=14,
         num_atoms=51,
         v_min=-2.0,
         v_max=6.0,
@@ -149,6 +150,7 @@ class RainbowDQN:
         beta_start=0.4,
         beta_frames=100000,
         target_update_interval=1000,
+        n_steps=3,
         device='cuda' if torch.cuda.is_available() else 'cpu'
     ):
         self.num_actions = num_actions
@@ -175,26 +177,65 @@ class RainbowDQN:
         self.updates_done = 0
         self.target_update_interval = target_update_interval
 
+        # For multi-step returns
+        self.n_steps = n_steps
+        self.n_step_buffer = deque(maxlen=self.n_steps)
+
     def select_action(self, observation):
         """
         Expects observation as a tensor of shape (4,128,128).
+        Resamples noise before selecting an action.
         """
+        self.online_net.reset_noise()  # Resample noise for exploration
         self.online_net.eval()
         with torch.no_grad():
             x = observation.unsqueeze(0).to(self.device)  # (1,4,128,128)
             dist = self.online_net(x)  # (1, num_actions, num_atoms)
             dist = torch.softmax(dist, dim=2)
-            q_values = torch.sum(dist * self.support.view(1,1,-1), dim=2)
+            q_values = torch.sum(dist * self.support.view(1, 1, -1), dim=2)
             action = q_values.argmax(dim=1).item()
         return action
 
     def store_transition(self, transition):
-        # transition: (obs, action, reward, next_obs, done)
-        self.buffer.store(transition)
+        """
+        transition: (obs, action, reward, next_obs, done)
+        Uses an n-step buffer to compute multi-step returns.
+        """
+        self.n_step_buffer.append(transition)
+        
+        # If the current transition ends the episode, flush the entire n-step buffer.
+        if transition[4]:
+            self._flush_n_step_buffer()
+        # Otherwise, if we have accumulated enough steps, store the multi-step transition.
+        elif len(self.n_step_buffer) >= self.n_steps:
+            R = sum([self.gamma**i * self.n_step_buffer[i][2] for i in range(self.n_steps)])
+            next_obs = self.n_step_buffer[-1][3]
+            done = any(t[4] for t in self.n_step_buffer)
+            obs, action, _, _, _ = self.n_step_buffer[0]
+            self.buffer.store((obs, action, R, next_obs, done))
+            self.n_step_buffer.popleft()
+
+    def _flush_n_step_buffer(self):
+        """
+        Flushes the remaining transitions in the n-step buffer
+        (used when a terminal state is reached before the buffer is full).
+        """
+        while self.n_step_buffer:
+            n = len(self.n_step_buffer)
+            R = sum([self.gamma**i * self.n_step_buffer[i][2] for i in range(n)])
+            next_obs = self.n_step_buffer[-1][3]
+            done = any(t[4] for t in self.n_step_buffer)
+            obs, action, _, _, _ = self.n_step_buffer[0]
+            self.buffer.store((obs, action, R, next_obs, done))
+            self.n_step_buffer.popleft()
 
     def update(self):
         if len(self.buffer.buffer) < self.batch_size:
             return
+
+        # Resample noise for both networks before computing forward passes
+        self.online_net.reset_noise()
+        self.target_net.reset_noise()
 
         self.updates_done += 1
         beta = min(1.0, self.beta_start + self.beta_increment_per_frame * self.frame_count)
@@ -208,11 +249,13 @@ class RainbowDQN:
         rewards_t = torch.FloatTensor(rewards).to(self.device).unsqueeze(1)
         dones_t = torch.FloatTensor(dones).to(self.device).unsqueeze(1)
 
+        # Current distribution from online network
         dist = self.online_net(obs_batch_t)
         dist = torch.log_softmax(dist, dim=2)
         dist_action = dist.gather(1, actions_t.unsqueeze(2).expand(self.batch_size, 1, self.num_atoms)).squeeze(1)
 
         with torch.no_grad():
+            # Use online net for best action selection and target net for evaluation
             next_dist = self.online_net(next_obs_batch_t)
             next_dist = torch.softmax(next_dist, dim=2)
             q_values_next = torch.sum(next_dist * self.support.view(1, 1, -1), dim=2)
@@ -250,5 +293,3 @@ class RainbowDQN:
         
         if self.updates_done % 100 == 0:
             print(f"Update {self.updates_done}: Loss = {loss.item():.4f}")
-
-

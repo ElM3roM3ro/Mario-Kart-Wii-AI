@@ -121,19 +121,19 @@ def train(num_episodes=100000):
     print("Initializing agent...")
     agent = RainbowDQN(
         state_shape=(4, 128, 128),
-        num_actions=13,
+        num_actions=14,
         lr=1e-4,
         buffer_size=50000,
         batch_size=32,
         gamma=0.99,
         v_min=-2.0,
-        v_max=6.0,
+        v_max=1500.0,
         num_atoms=51,
-        target_update_interval=1000,
+        target_update_interval=2000,
         device='cuda'  # adjust as needed 
     )
     
-    max_steps_per_episode = 2000
+    max_steps_per_episode = 1000
     os.makedirs("checkpoints", exist_ok=True)
     
     for episode in range(num_episodes):
