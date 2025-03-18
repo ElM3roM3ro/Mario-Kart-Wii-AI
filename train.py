@@ -14,10 +14,10 @@ data_shape = (Ymem + 1, Xmem)
 
 def launch_dolphin():
     # Update these paths to match your system
-    dolphin_path = r"F:\DolphinEmuFork_src\dolphin\Binary\x64\Dolphin.exe"  # Path to Dolphin.exe
-    script_path = r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\env.py"         # Path to env.py script
-    savestate_path = r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\delfino_savestate.sav"  # Savestate file at countdown
-    game_path = r"E:\Games\Dolphin Games\MarioKart(Compress).iso"                # Your game file
+    dolphin_path = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\dolphin-x64-framedrawn-stable\Dolphin.exe"  # Path to Dolphin.exe
+    script_path = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\env.py"      # Path to env.py script
+    savestate_path = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\delfino_savestate.sav"  # Savestate file at countdown
+    game_path = r"C:\Users\nolan\source\repos\dolphin\Source\Core\DolphinQt\MarioKart(Compress).iso"                # Your game file
 
     # Build the command string without the 'cd' part.
     cmd = (
@@ -26,9 +26,7 @@ def launch_dolphin():
         f'--save_state="{savestate_path}" '
         f'--exec="{game_path}"'
     )
-    
-    print("Launching Dolphin with command:")
-    print(cmd)
+    print(f"Launching Dolphin with command: {cmd}")
     
     subprocess.Popen(cmd, shell=True)
     print("Launched Dolphin with savestate loaded.")

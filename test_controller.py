@@ -40,23 +40,6 @@ def send_test_inputs():
         },
     ]
     
-<<<<<<< HEAD
-    print("[Test] Starting Wii input test.")
-    for seq in sequences:
-        print("[Test] Sending sequence:", seq)
-        controller.set_wiimote_buttons(0, seq["wiimote"])
-        controller.set_wii_nunchuk_buttons(0, seq["nunchuk"])
-        print("Wiimote Actual: ", controller.get_wiimote_buttons(0))
-        print("Nunchuck Actual: ", controller.get_wii_nunchuk_buttons(0))
-    
-    print("[Test] Clearing Wii inputs.")
-    controller.set_wiimote_buttons(0, {})
-    controller.set_wii_nunchuk_buttons(0, {})
-    print("[Test] Input test complete.")
-
-#savestate.load_from_slot(0)
-send_test_inputs()
-=======
     start_time = time.time()
     action_index = 0
     print("[Test] Starting controller input test for", duration, "seconds.")
@@ -189,4 +172,3 @@ if __name__ == "__main__":
     print("[Test] Running inside Dolphin. Waiting 5 seconds for the savestate to load...")
     time.sleep(5)
     send_test_inputs()
->>>>>>> 534610a990931ade1b4446938939b109a6faa509

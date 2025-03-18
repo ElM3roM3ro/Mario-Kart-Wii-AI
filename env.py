@@ -1,7 +1,7 @@
 import time
 import collections
 import sys
-sys.path.append(r"F:\Python\3.12.0\Lib\site-packages")
+sys.path.append(r"C:\Users\nolan\AppData\Local\Programs\Python\Python312\Lib\site-packages")
 import numpy as np
 from PIL import Image
 import torch
