@@ -2,11 +2,13 @@ import time
 import collections
 import sys
 import random
-user = "Zach"
+user = "Victor"
 if user == "Nolan":
     sys.path.append(r"C:\Users\nolan\AppData\Local\Programs\Python\Python312\Lib\site-packages") # Nolan's path
 elif user == "Zach":
     sys.path.append(r"F:\Python\3.12.0\Lib\site-packages") # Zach's path
+elif user == "Victor":
+    sys.path.append(r"C:\Users\victo\AppData\Local\Programs\Python\Python312\Lib\site-packages")
 import numpy as np
 from PIL import Image
 import torch
