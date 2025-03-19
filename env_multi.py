@@ -3,7 +3,7 @@ import collections
 import sys
 import random
 
-user = "Nolan"
+user = "Zach"
 if user == "Nolan":
     sys.path.append(r"C:\Users\nolan\AppData\Local\Programs\Python\Python312\Lib\site-packages") # Nolan's path
 elif user == "Zach":
@@ -86,6 +86,7 @@ last_fps_time = time.time()
 resetting = False
 
 # Memory addresses for game state.
+DRIVE_DIR_ADDR = 0x802c360f # 1:Forward, 2:Backward
 MINUTES_ADDR = 0x80e48df9
 SECONDS_ADDR = 0x80e48dfa
 MILLISECONDS_ADDR = 0x80e48dfc
@@ -319,6 +320,14 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
     pil_state = pil_state.resize((Xmem, Ymem), Image.BILINEAR)
     state_down = np.array(pil_state)
     shm_array[1:, :] = state_down
+
+    if memory.read_u8(DRIVE_DIR_ADDR) == 1:
+        resetting = True
+        penalty = 7.5
+        reward -= penalty
+        shm_array[0, 3] = reward
+        reset_environment(initial=False)
+        return
 
     # New low-speed reset condition:
     if speed < 25:
