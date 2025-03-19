@@ -2,11 +2,15 @@ import time
 import collections
 import sys
 import random
-user = "Zach"
+
+user = "Nolan"
 if user == "Nolan":
     sys.path.append(r"C:\Users\nolan\AppData\Local\Programs\Python\Python312\Lib\site-packages") # Nolan's path
 elif user == "Zach":
     sys.path.append(r"F:\Python\3.12.0\Lib\site-packages") # Zach's path
+elif user == "Victor":
+    sys.path.append(r"C:\Users\victo\AppData\Local\Programs\Python\Python312\Lib\site-packages") # Victor's path
+
 import numpy as np
 from PIL import Image
 import torch
@@ -407,13 +411,13 @@ def reset_environment(initial=False):
     else:
         reset_choice = random.randint(0, 4)
         if reset_choice == 1:
-            savestate.load_from_file(r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino_savestateGoodStart.sav")
+            savestate.load_from_file(r"funky_flame_delfino_savestateGoodStart.sav")
         if reset_choice == 2:
-            savestate.load_from_file(r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino_savestate2.sav")
+            savestate.load_from_file(r"funky_flame_delfino_savestate2.sav")
         if reset_choice == 3:
-            savestate.load_from_file(r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino_savestate3.sav")
+            savestate.load_from_file(r"funky_flame_delfino_savestate3.sav")
         if reset_choice == 4:
-            savestate.load_from_file(r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino_savestate4.sav")
+            savestate.load_from_file(r"funky_flame_delfino_savestate4.sav")
         # Optionally, choose a random savestate slot or wait as needed.
         # time.sleep(3)
 
