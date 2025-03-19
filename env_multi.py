@@ -30,7 +30,9 @@ Xmem = 94
 # Shared memory layout (row 0):
 # [Dolphin timestep, Emulator timestep, action, reward, terminal, speed, lap_progress]
 # Rows 1: state (downsampled image data)
-shm_name = 'dolphin_shared'
+import os
+shm_name = os.environ.get("SHM_NAME", "dolphin_shared")
+
 data = np.zeros((Ymem + 1, Xmem), dtype=np.float32)
 try:
     shm = shared_memory.SharedMemory(create=True, size=data.nbytes, name=shm_name)
@@ -122,11 +124,12 @@ def read_time():
         return 0.0
 
 # --- Configurable Parameters ---
-PROGRESS_UNIT = 0.1            # Reward unit per 0.1 progress increment.
+PROGRESS_UNIT = 0.0143          # Reward unit per 0.1 progress increment.
 SPEED_SCALE = 50.0             # Scale factor for speed in progress reward.
 SPEED_THRESHOLD = 80.0         # Threshold for bonus speed reward.
 TERMINAL_BONUS = 10.0          # Bonus reward when lap_progress reaches the terminal condition.
 DRIFTING_PENALTY = 1.0         # Penalty for drifting at low speed.
+PREMATURE_A_PENALTY = 1.0      # Penalty for holding A too early
 DRIFT_SPEED_THRESHOLD = 45.0   # Speed below which drifting is penalized.
 NORMALIZATION_FACTOR = 1000.0   # Adjust as needed (was commented as 800, so confirm the intended scale).
 LAMBDA = 1.0                 # Scaling factor for lap progress in potential.
@@ -163,49 +166,102 @@ def compute_shaping_reward(lap_progress, elapsed_time, last_lap_progress, last_e
         phi_old = LAMBDA * last_lap_progress - MU * last_elapsed_time
     return phi_new - phi_old
 
+# def compute_reward():
+#     """
+#     Computes a normalized reward including:
+#       - Progress-based reward.
+#       - Potential-based shaping.
+#       - Terminal bonus and drifting penalty.
+#     """
+#     global last_lap_progress, last_elapsed_time, last_action
+
+#     state = read_game_state()
+#     if state is None:
+#         return 0.0, 0.0, 0.0, 0.0
+
+#     speed = state['speed']
+#     lap_progress = state['lap_progress']
+#     elapsed_time = read_time()
+
+#     # --- Progress Reward ---
+#     base_reward = compute_progress_reward(lap_progress, last_lap_progress, speed)
+    
+#     # --- Potential-Based Shaping ---
+#     shaping_reward = compute_shaping_reward(lap_progress, elapsed_time, last_lap_progress, last_elapsed_time)
+    
+#     raw_reward = base_reward + shaping_reward
+
+#     # --- Terminal Bonus ---
+#     terminal = 0.0
+#     if lap_progress >= 4:
+#         raw_reward += TERMINAL_BONUS
+#         terminal = 1.0
+
+#     # --- Drifting Penalty ---
+#     drifting_actions = {3, 4, 5, 6, 7, 8}
+#     if last_action in drifting_actions and speed < DRIFT_SPEED_THRESHOLD:
+#         raw_reward -= DRIFTING_PENALTY
+
+#     if controller.get_wiimote_buttons(0)["A"] == True and timestep < 145:
+#         raw_reward -= PREMATURE_A_PENALTY
+
+#     # Update last progress and time for the next frame.
+#     last_lap_progress = lap_progress
+#     last_elapsed_time = elapsed_time
+
+#     normalized_reward = raw_reward / NORMALIZATION_FACTOR
+
+#     return float(normalized_reward), terminal, speed, lap_progress
+
+# Global variable to track the previous lap progress.
+last_lap_progress = None
+
 def compute_reward():
     """
-    Computes a normalized reward including:
-      - Progress-based reward.
-      - Potential-based shaping.
-      - Terminal bonus and drifting penalty.
+    Simplified reward function:
+      - Base reward: the current speed.
+      - For every 0.0143 increment in lap progress, add 0.1 reward.
+      - When lap progress crosses a whole number, add a bonus of 10.
+      - Terminal flag is set if lap_progress reaches or exceeds 4.
+      
+    Returns:
+      normalized_reward (float), terminal (float), speed (float), lap_progress (float)
     """
-    global last_lap_progress, last_elapsed_time, last_action
-
-    state = read_game_state()
+    global last_lap_progress
+    
+    state = read_game_state()  # Assumes a function returning a dict with 'speed' and 'lap_progress'
     if state is None:
         return 0.0, 0.0, 0.0, 0.0
 
     speed = state['speed']
     lap_progress = state['lap_progress']
-    elapsed_time = read_time()
-
-    # --- Progress Reward ---
-    base_reward = compute_progress_reward(lap_progress, last_lap_progress, speed)
     
-    # --- Potential-Based Shaping ---
-    shaping_reward = compute_shaping_reward(lap_progress, elapsed_time, last_lap_progress, last_elapsed_time)
-    
-    raw_reward = base_reward + shaping_reward
+    # Base reward from speed.
+    reward = speed / 1000
 
-    # --- Terminal Bonus ---
-    terminal = 0.0
-    if lap_progress >= 4:
-        raw_reward += TERMINAL_BONUS
-        terminal = 1.0
+    # If this is the first call, just set last_lap_progress.
+    if last_lap_progress is None:
+        last_lap_progress = lap_progress
 
-    # --- Drifting Penalty ---
-    drifting_actions = {3, 4, 5, 6, 7, 8}
-    if last_action in drifting_actions and speed < DRIFT_SPEED_THRESHOLD:
-        raw_reward -= DRIFTING_PENALTY
+    # Compute how much lap progress increased since the last frame.
+    lap_diff = lap_progress - last_lap_progress
 
-    # Update last progress and time for the next frame.
+    # Add 0.1 reward for each 0.0143 increment.
+    if lap_diff >= 0.0143:
+        num_increments = int(lap_diff / 0.0143)
+        reward += 0.1 * num_increments
+
+    # If lap progress crosses a whole number boundary, add a bonus of 10.
+    if int(lap_progress) > int(last_lap_progress) and int(last_lap_progress) != 0:
+        reward += 10
+
+    # Set terminal flag if lap_progress reaches or exceeds 4 (you can adjust this value).
+    terminal = 1.0 if lap_progress >= 4.0 else 0.0
+
+    # Update last_lap_progress for the next call.
     last_lap_progress = lap_progress
-    last_elapsed_time = elapsed_time
 
-    normalized_reward = raw_reward / NORMALIZATION_FACTOR
-
-    return float(normalized_reward), terminal, speed, lap_progress
+    return float(reward), terminal, speed, lap_progress
 
 def read_game_state():
     try:
@@ -247,7 +303,7 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
     state_img = np.stack(list(frame_buffer), axis=0)
     reward, terminal, speed, lap_progress = compute_reward()
     timestep += 1
-    print(f"env.py: t={timestep}, Reward={reward}, Terminal={terminal}, Speed={speed}, LapProgress={lap_progress}")
+    #print(f"env.py: t={timestep}, Reward={reward}, Terminal={terminal}, Speed={speed}, LapProgress={lap_progress}")
     shm_array[0, 0] = timestep
     shm_array[0, 1] = timestep
     shm_array[0, 3] = reward
@@ -261,16 +317,9 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
     shm_array[1:, :] = state_down
 
     # New low-speed reset condition:
-    if speed < 40:
-        low_speed_counter += 1
-    else:
-        low_speed_counter = 0
-
-    if low_speed_counter >= 40 and timestep > 360 and not resetting:
-        print("Low speed detected for 720 consecutive frames. Initiating environment reset...")
-        low_speed_counter = 0  # Reset the counter after triggering the reset.
+    if speed < 45:
         resetting = True
-        penalty = 10
+        penalty = 5
         reward -= penalty
         shm_array[0, 3] = reward
         reset_environment(initial=False)
@@ -288,7 +337,7 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
     # Only update held_action if a new action is provided.
     if new_action != held_action:
         held_action = new_action
-        print(f"New action selected: {held_action}")
+        #print(f"New action selected: {held_action}")
     # Apply the held action every frame.
     apply_action(held_action)
 
@@ -356,7 +405,15 @@ def reset_environment(initial=False):
     if initial:
         print("Initial reset: Using CLI savestate.")
     else:
-        savestate.load_from_file(r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino_savestate.sav")
+        reset_choice = random.randint(0, 4)
+        if reset_choice == 1:
+            savestate.load_from_file(r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino_savestateGoodStart.sav")
+        if reset_choice == 2:
+            savestate.load_from_file(r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino_savestate2.sav")
+        if reset_choice == 3:
+            savestate.load_from_file(r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino_savestate3.sav")
+        if reset_choice == 4:
+            savestate.load_from_file(r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino_savestate4.sav")
         # Optionally, choose a random savestate slot or wait as needed.
         # time.sleep(3)
 
