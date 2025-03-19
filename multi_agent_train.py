@@ -100,17 +100,17 @@ paths = {
 user = "Nolan"
 if user == "Nolan":
     paths["dolphin_path"] = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\dolphin-x64-framedrawn-stable\Dolphin.exe"
-    paths["script_path"] = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\env.py"
+    paths["script_path"] = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\env_multi.py"
     paths["savestate_path"] = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_delfino_savestate.sav"
     paths["game_path"] = r"C:\Users\nolan\source\repos\dolphin\Source\Core\DolphinQt\MarioKart(Compress).iso"
 elif user == "Zach":
     paths["dolphin_path"] = r"F:\DolphinEmuFork_src\dolphin\Binary\x64\Dolphin.exe"
-    paths["script_path"] = r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\env.py"
+    paths["script_path"] = r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\env_multi.py"
     paths["savestate_path"] = r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino_savestate.sav"
     paths["game_path"] = r"E:\Games\Dolphin Games\MarioKart(Compress).iso"
 elif user == "Victor":
     paths["dolphin_path"] = r"C:\Users\victo\FunkyKong\dolphin-x64-framedrawn-stable\Dolphin.exe"
-    paths["script_path"] = r"C:\Users\victo\FunkyKong\Mario-Kart-Wii-AI\env.py"
+    paths["script_path"] = r"C:\Users\victo\FunkyKong\Mario-Kart-Wii-AI\env_multi.py"
     paths["savestate_path"] = r"C:\Users\victo\FunkyKong\Mario-Kart-Wii-AI\funky_flame_delfino_savestate.sav"
     paths["game_path"] = r"C:\Users\victo\FunkyKong\dolphin-x64-framedrawn-stable\MarioKart(Compress).iso"
 
@@ -136,6 +136,7 @@ def launch_dolphin_for_worker(worker_id):
         f'--save_state="{paths["savestate_path"]}" '
         f'--exec="{paths["game_path"]}"'
     )
+
     subprocess.Popen(cmd, shell=True)
     return shm_name
 
