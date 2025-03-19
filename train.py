@@ -19,7 +19,7 @@ paths = {
     "game_path": r"C:\Users\nolan\source\repos\dolphin\Source\Core\DolphinQt\MarioKart(Compress).iso",
 }
 
-user = "Zach"
+user = "Nolan"
 if user == "Nolan":
     paths["dolphin_path"] = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\dolphin-x64-framedrawn-stable\Dolphin.exe"
     paths["script_path"] = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\env.py"
@@ -30,6 +30,11 @@ elif user == "Zach":
     paths["script_path"] = r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\env.py"
     paths["savestate_path"] = r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino_savestate.sav"
     paths["game_path"] = r"E:\Games\Dolphin Games\MarioKart(Compress).iso"
+elif user == "Victor":
+    paths["dolphin_path"] = r"C:\Users\victo\FunkyKong\dolphin-x64-framedrawn-stable\Dolphin.exe"
+    paths["script_path"] = r"C:\Users\victo\FunkyKong\Mario-Kart-Wii-AI\env.py"
+    paths["savestate_path"] = r"C:\Users\victo\FunkyKong\Mario-Kart-Wii-AI\funky_flame_delfino_savestate.sav"
+    paths["game_path"] = r"C:\Users\victo\FunkyKong\dolphin-x64-framedrawn-stable\MarioKart(Compress).iso"
 
 def launch_dolphin():
     # Update these paths to match your system

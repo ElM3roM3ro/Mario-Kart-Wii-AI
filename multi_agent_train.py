@@ -97,12 +97,35 @@ paths = {
     "game_path": r"E:\Games\Dolphin Games\MarioKart(Compress).iso",
 }
 
+user = "Nolan"
+if user == "Nolan":
+    paths["dolphin_path"] = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\dolphin-x64-framedrawn-stable\Dolphin.exe"
+    paths["script_path"] = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\env.py"
+    paths["savestate_path"] = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_delfino_savestate.sav"
+    paths["game_path"] = r"C:\Users\nolan\source\repos\dolphin\Source\Core\DolphinQt\MarioKart(Compress).iso"
+elif user == "Zach":
+    paths["dolphin_path"] = r"F:\DolphinEmuFork_src\dolphin\Binary\x64\Dolphin.exe"
+    paths["script_path"] = r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\env.py"
+    paths["savestate_path"] = r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino_savestate.sav"
+    paths["game_path"] = r"E:\Games\Dolphin Games\MarioKart(Compress).iso"
+elif user == "Victor":
+    paths["dolphin_path"] = r"C:\Users\victo\FunkyKong\dolphin-x64-framedrawn-stable\Dolphin.exe"
+    paths["script_path"] = r"C:\Users\victo\FunkyKong\Mario-Kart-Wii-AI\env.py"
+    paths["savestate_path"] = r"C:\Users\victo\FunkyKong\Mario-Kart-Wii-AI\funky_flame_delfino_savestate.sav"
+    paths["game_path"] = r"C:\Users\victo\FunkyKong\dolphin-x64-framedrawn-stable\MarioKart(Compress).iso"
+
 def launch_dolphin_for_worker(worker_id):
     shm_name = f"dolphin_shared_{worker_id}"
     os.environ["SHM_NAME"] = shm_name
 
     # Use a unique user directory for each Dolphin instance:
-    user_dir = f"C:\\Users\\Zachary\\DolphinUserDirs\\instance_{worker_id}"
+    if user == "Nolan":
+        user_dir = f"C:\\Users\\nolan\\DolphinUserDirs\\instance_{worker_id}"
+    elif user == "Zach":
+        user_dir = f"C:\\Users\\Zachary\\DolphinUserDirs\\instance_{worker_id}"
+    elif user == "Victor":
+        user_dir = f"C:\\Users\\victo\\DolphinUserDirs\\instance_{worker_id}"
+
     os.makedirs(user_dir, exist_ok=True)
 
     cmd = (
