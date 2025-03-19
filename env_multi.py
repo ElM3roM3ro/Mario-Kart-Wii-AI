@@ -317,7 +317,7 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
     shm_array[1:, :] = state_down
 
     # New low-speed reset condition:
-    if speed < 45:
+    if speed < 25:
         resetting = True
         penalty = 5
         reward -= penalty

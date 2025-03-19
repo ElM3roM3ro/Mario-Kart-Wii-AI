@@ -179,7 +179,7 @@ def worker_process(worker_id, global_buffer, global_weights, episode_rewards):
         batch_size=64,
         gamma=0.99,
         v_min=-5.0,
-        v_max=1000.0,
+        v_max=10.0,
         num_atoms=51,
         target_update_interval=2000,
         device='cuda'
@@ -232,7 +232,7 @@ def worker_process(worker_id, global_buffer, global_weights, episode_rewards):
                     done = True
 
             # At the end of the episode, print the cumulated reward
-            print(f"Worker {worker_id}: Cumulative reward for this episode: {episode_reward:.3f}")
+            print(f"Worker {worker_id}: Avg reward for this episode: {(episode_reward/steps):.3f}")
             # Record episode reward in the reward log.
             episode_rewards.append(episode_reward)
             time.sleep(0.1)
@@ -251,7 +251,7 @@ def master_trainer(global_buffer, global_weights, loss_logs, num_updates=10000, 
         batch_size=batch_size,
         gamma=0.99,
         v_min=-5.0,
-        v_max=1000.0,
+        v_max=10.0,
         num_atoms=51,
         target_update_interval=update_interval,
         device='cuda'
@@ -363,7 +363,7 @@ def plot_metrics(loss_logs, episode_rewards):
 
 # ----- Main Multi-Agent Launch -----
 def main():
-    num_workers = 8  # Number of parallel Dolphin/agent instances.
+    num_workers = 6  # Number of parallel Dolphin/agent instances.
     global_buffer = GlobalReplayBuffer(capacity=50000)
     manager = mp.Manager()
     global_weights = manager.dict()
