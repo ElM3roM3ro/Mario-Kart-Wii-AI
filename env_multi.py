@@ -220,7 +220,7 @@ def compute_reward():
     """
     Simplified reward function:
       - Base reward: the current speed.
-      - For every 0.0143 increment in lap progress, add 0.1 reward.
+      - For every 0.001 increment in lap progress, add 0.01 reward.
       - When lap progress crosses a whole number, add a bonus of 10.
       - Terminal flag is set if lap_progress reaches or exceeds 4.
       
