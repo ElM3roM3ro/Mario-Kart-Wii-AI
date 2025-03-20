@@ -2,20 +2,22 @@ import time
 import collections
 import sys
 import random
-
-user = "Zach"
-if user == "Nolan":
-    sys.path.append(r"C:\Users\nolan\AppData\Local\Programs\Python\Python312\Lib\site-packages")  # Nolan's path
-elif user == "Zach":
-    sys.path.append(r"F:\Python\3.12.0\Lib\site-packages")  # Zach's path
-elif user == "Victor":
-    sys.path.append(r"C:\Users\victo\AppData\Local\Programs\Python\Python312\Lib\site-packages")  # Victor's path
-
+import os
 import numpy as np
 from PIL import Image
 import torch
 from multiprocessing import shared_memory
 
+# Set user-specific site-packages paths.
+user = "Zach"
+if user == "Nolan":
+    sys.path.append(r"C:\Users\nolan\AppData\Local\Programs\Python\Python312\Lib\site-packages")
+elif user == "Zach":
+    sys.path.append(r"F:\Python\3.12.0\Lib\site-packages")
+elif user == "Victor":
+    sys.path.append(r"C:\Users\victo\AppData\Local\Programs\Python\Python312\Lib\site-packages")
+
+# Import Dolphin modules.
 try:
     from dolphin import event, controller, memory, savestate
 except ImportError:
@@ -28,14 +30,20 @@ except ImportError:
     memory = Dummy()
     savestate = Dummy()
 
-# Shared memory parameters.
-Ymem = 78
-Xmem = 94  
-# Shared memory layout (row 0 holds metadata; rows 1: state hold the downsampled image data).
-import os
+# --- Parameters ---
+# Shared memory: originally Ymem and Xmem were for a single downsampled frame.
+# Now, we want to store 4 frames. We set:
+Ymem = 78           # downsampled height of each frame
+Xmem = 94           # downsampled width of each frame
+num_frames = 4      # number of frames to stack
+
+# Total shared memory shape: row 0 reserved for metadata; rows 1 to (num_frames*Ymem) hold image data.
+SHM_ROWS = 1 + num_frames * Ymem  # e.g. 1 + 4*78 = 313
+SHM_COLS = Xmem
 shm_name = os.environ.get("SHM_NAME", "dolphin_shared")
 
-data = np.zeros((Ymem + 1, Xmem), dtype=np.float32)
+# Create (or attach to) shared memory.
+data = np.zeros((SHM_ROWS, SHM_COLS), dtype=np.float32)
 try:
     shm = shared_memory.SharedMemory(create=True, size=data.nbytes, name=shm_name)
     print("env_multi.py: Created new shared memory.")
@@ -48,9 +56,9 @@ shm_array[:] = data[:]
 # Image processing parameters.
 target_width = 128
 target_height = 128
-frame_buffer = collections.deque(maxlen=4)
+frame_buffer = collections.deque(maxlen=num_frames)
 
-# --- Translated Actions for Wii Controllers ---
+# --- Controller Actions ---
 wiimote_actions = [
     {"B": False},   # Default remote state (A pressed)
     {"B": True},    # Alternate remote state (for drift, etc.)
@@ -68,7 +76,7 @@ nunchuck_actions = [
     {"StickX": 0.0, "StickY": 0.0, "Z": False},    # Index 9: Neutral.
     {"StickX": 0.0, "StickY": 0.0, "Z": True},     # Index 10: Neutral with item usage.
 ]
-# Note: Your agent’s action space should now include these two new actions (indices 11 and 12).
+# Note: indices 11 and 12 are additional actions that your agent's action space should support.
 
 current_action = 0  
 timestep = 0        
@@ -102,6 +110,7 @@ def process_frame(width, height, data_bytes):
     except Exception as e:
         print("env_multi.py: Error in Image.frombytes:", e)
         return None
+    # Convert to grayscale and resize to target dimensions.
     image = image.convert("L").resize((target_width, target_height), Image.BILINEAR)
     return np.array(image)
 
@@ -123,11 +132,7 @@ MU = 0.5
 
 def compute_reward():
     """
-    Simplified reward function:
-      - Base reward from speed.
-      - For every small increment in lap progress, a minor reward is added.
-      - Crossing a whole number boundary adds a bonus.
-      - Terminal flag is set if lap_progress reaches/exceeds 4.
+    Computes reward based on speed and lap progress.
     Returns: normalized_reward, terminal, speed, lap_progress
     """
     global last_lap_progress
@@ -170,11 +175,11 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
         print("env_multi.py: Frame processing failed.")
         return
     frame_buffer.append(frame)
-    if len(frame_buffer) < 4:
+    if len(frame_buffer) < num_frames:
         return
 
-    # Stack the 4 distinct frames.
-    state_img = np.stack(list(frame_buffer), axis=0)  # shape (4, target_height, target_width)
+    # Stack 4 distinct frames (each of shape (target_height, target_width)).
+    state_img = np.stack(list(frame_buffer), axis=0)  # shape: (4, 128, 128)
     reward, terminal, speed, lap_progress = compute_reward()
     timestep += 1
 
@@ -186,15 +191,15 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
     shm_array[0, 5] = speed
     shm_array[0, 6] = lap_progress
 
-    # Downsample each frame from (target_width,target_height) to (Xmem, Ymem)
+    # Downsample each frame from (128, 128) to (Xmem, Ymem) using bilinear interpolation.
     stacked_down = []
-    for i in range(4):
+    for i in range(num_frames):
         pil_img = Image.fromarray(state_img[i])
         pil_img = pil_img.resize((Xmem, Ymem), Image.BILINEAR)
         stacked_down.append(np.array(pil_img))
-    stacked_down = np.stack(stacked_down, axis=0)  # shape (4, Ymem, Xmem)
-    # Flatten the 4 frames into a 2D array of shape (4*Ymem, Xmem)
-    flat_state = stacked_down.reshape(4 * Ymem, Xmem)
+    stacked_down = np.stack(stacked_down, axis=0)  # shape: (4, Ymem, Xmem)
+    # Flatten vertically: shape becomes (4*Ymem, Xmem)
+    flat_state = stacked_down.reshape(num_frames * Ymem, Xmem)
     shm_array[1:, :] = flat_state
 
     # Low-speed reset condition.
@@ -218,6 +223,7 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
         held_action = new_action
     apply_action(held_action)
 
+# Register the on_framedrawn callback.
 event.on_framedrawn(on_framedrawn)
 
 def apply_action(action_index):
@@ -273,10 +279,10 @@ def reset_environment(initial=False):
         if shm_array[0, 1] == timestep:
             break
         time.sleep(0.01)
-    shm_array[0, 3] = 0.0
-    shm_array[0, 4] = 0.0
-    # Clear the state image area.
-    shm_array[1:, :] = np.zeros((Ymem, Xmem), dtype=np.float32)
+    shm_array[0, 3] = 0.0  # Reward.
+    shm_array[0, 4] = 0.0  # Terminal.
+    # Clear the state area.
+    shm_array[1:, :] = np.zeros((SHM_ROWS-1, SHM_COLS), dtype=np.float32)
     timestep += 1
     shm_array[0, 0] = timestep
     print("Environment reset complete.")
@@ -288,8 +294,8 @@ def main_loop():
         current_action = int(shm_array[0, 2])
         apply_action(current_action)
 
-# For initial start, perform an initial reset.
+# For initial start, perform an initial reset (Dolphin loads CLI savestate).
 reset_environment(initial=True)
+
 import threading
 threading.Thread(target=main_loop, daemon=True).start()
-
