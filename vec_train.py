@@ -96,8 +96,8 @@ class DolphinWrapper(gym.Env):
 # These paths match your original settings.
 paths = {
     "dolphin_path": r"F:\DolphinEmuFork_src\dolphin\Binary\x64\Dolphin.exe",
-    "script_path": r"F:\MKWii_Capstone_Project\UPDATED_MKWii_Capstone\Mario-Kart-Wii-AI\env_multi.py",
-    "savestate_path": r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino_savestate.sav",
+    "script_path": r"F:\MKWii_Capstone_Project\UPDATED_MKWii_Capstone\Mario-Kart-Wii-AI\vec_env.py",
+    "savestate_path": r"F:\MKWii_Capstone_Project\UPDATED_MKWii_Capstone\Mario-Kart-Wii-AI\funky_flame_delfino_savestate.sav",
     "game_path": r"E:\Games\Dolphin Games\MarioKart(Compress).iso",
 }
 user = "Zach"
