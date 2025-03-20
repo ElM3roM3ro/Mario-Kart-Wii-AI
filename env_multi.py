@@ -242,7 +242,7 @@ def compute_reward():
     lap_progress = state['lap_progress']
     
     # Base reward from speed.
-    reward = speed / 2500
+    reward = speed / 250
 
     # If this is the first call, just set last_lap_progress.
     if last_lap_progress is None:
@@ -254,7 +254,7 @@ def compute_reward():
     # Add 0.1 reward for each 0.0143 increment.
     if lap_diff >= 0.0001:
         num_increments = int(lap_diff / 0.0001)
-        reward += 0.0025 * num_increments
+        reward += 0.025 * num_increments
 
     # If lap progress crosses a whole number boundary, add a bonus of 10.
     if int(lap_progress) > int(last_lap_progress) and int(last_lap_progress) != 0:
@@ -308,6 +308,7 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
     state_img = np.stack(list(frame_buffer), axis=0)
     reward, terminal, speed, lap_progress = compute_reward()
     timestep += 1
+
     #print(f"env.py: t={timestep}, Reward={reward}, Terminal={terminal}, Speed={speed}, LapProgress={lap_progress}")
     shm_array[0, 0] = timestep
     shm_array[0, 1] = timestep
@@ -321,18 +322,18 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
     state_down = np.array(pil_state)
     shm_array[1:, :] = state_down
 
-    if memory.read_u8(DRIVE_DIR_ADDR) == 1:
-        resetting = True
-        penalty = .075
-        reward -= penalty
-        shm_array[0, 3] = reward
-        reset_environment(initial=False)
-        return
+    # if memory.read_u8(DRIVE_DIR_ADDR) == 1:
+    #     resetting = True
+    #     penalty = .075
+    #     reward -= penalty
+    #     shm_array[0, 3] = reward
+    #     reset_environment(initial=False)
+    #     return
 
     # New low-speed reset condition:
-    if speed < 35:
+    if speed < 45:
         resetting = True
-        penalty = .05
+        penalty = .5
         reward -= penalty
         shm_array[0, 3] = reward
         reset_environment(initial=False)
@@ -418,7 +419,7 @@ def reset_environment(initial=False):
     if initial:
         print("Initial reset: Using CLI savestate.")
     else:
-        reset_choice = random.randint(0, 4)
+        reset_choice = random.randint(1, 4)
         if reset_choice == 1:
             savestate.load_from_file(r"funky_flame_delfino_savestate_startv2.sav")
         if reset_choice == 2:
@@ -428,7 +429,7 @@ def reset_environment(initial=False):
         if reset_choice == 4:
             savestate.load_from_file(r"funky_flame_delfino_savestate4.sav")
         # Optionally, choose a random savestate slot or wait as needed.
-        # time.sleep(3)
+        #time.sleep(1)
 
     # Wait until Dolphin updates a specific shared memory value.
     while True:

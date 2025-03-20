@@ -276,7 +276,7 @@ def worker_process(worker_id, global_buffer, global_weights, episode_rewards):
 
             print(f"Worker {worker_id}: Avg reward for this episode: {(episode_reward/steps):.3f}")
             episode_rewards.append(episode_reward)
-            time.sleep(0.1)
+            #time.sleep(0.1)
         except Exception as e:
             print(f"Worker {worker_id}: Exception occurred: {e}")
             time.sleep(1)
@@ -406,7 +406,8 @@ def plot_metrics(loss_logs, episode_rewards):
 # ----- Main Multi-Agent Launch -----
 def main():
     num_workers = 6  # Number of parallel Dolphin/agent instances.
-    global_buffer = GlobalReplayBuffer(capacity=(num_workers*1000000))
+    scaled_buffer = num_workers * 1000000
+    global_buffer = GlobalReplayBuffer(capacity=scaled_buffer)
     manager = mp.Manager()
     global_weights = manager.dict()
     loss_logs = manager.list()
