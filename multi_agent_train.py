@@ -96,7 +96,7 @@ def save_stacked_tensor_as_png(worker_id, frame_count, tensor):
 # ----- Paths and Dolphin Launcher -----
 paths = {
     "dolphin_path": r"F:\DolphinEmuFork_src\dolphin\Binary\x64\Dolphin.exe",
-    "script_path": r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\env_multi.py",
+    "script_path": r"F:\MKWii_Capstone_Project\UPDATED_MKWii_Capstone\Mario-Kart-Wii-AI\env_multi.py",
     "savestate_path": r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino_savestate.sav",
     "game_path": r"E:\Games\Dolphin Games\MarioKart(Compress).iso",
 }
@@ -109,7 +109,7 @@ if user == "Nolan":
     paths["game_path"] = r"C:\Users\nolan\source\repos\dolphin\Source\Core\DolphinQt\MarioKart(Compress).iso"
 elif user == "Zach":
     paths["dolphin_path"] = r"F:\DolphinEmuFork_src\dolphin\Binary\x64\Dolphin.exe"
-    paths["script_path"] = r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\env_multi.py"
+    paths["script_path"] = r"F:\MKWii_Capstone_Project\UPDATED_MKWii_Capstone\Mario-Kart-Wii-AI\env_multi.py"
     paths["savestate_path"] = r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino_savestate.sav"
     paths["game_path"] = r"E:\Games\Dolphin Games\MarioKart(Compress).iso"
 elif user == "Victor":
@@ -406,7 +406,7 @@ def plot_metrics(loss_logs, episode_rewards):
 # ----- Main Multi-Agent Launch -----
 def main():
     num_workers = 6  # Number of parallel Dolphin/agent instances.
-    global_buffer = GlobalReplayBuffer(capacity=6000000)
+    global_buffer = GlobalReplayBuffer(capacity=(num_workers*1000000))
     manager = mp.Manager()
     global_weights = manager.dict()
     loss_logs = manager.list()

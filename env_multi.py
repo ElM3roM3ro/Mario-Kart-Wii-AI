@@ -298,12 +298,12 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
         return
 
     # Calculate and print FPS every second.
-    fps_counter += 1
-    current_time = time.time()
-    if current_time - last_fps_time >= 1.0:
-        print(f"FPS: {fps_counter}")
-        fps_counter = 0
-        last_fps_time = current_time
+    # fps_counter += 1
+    # current_time = time.time()
+    # if current_time - last_fps_time >= 1.0:
+    #     print(f"FPS: {fps_counter}")
+    #     fps_counter = 0
+    #     last_fps_time = current_time
 
     state_img = np.stack(list(frame_buffer), axis=0)
     reward, terminal, speed, lap_progress = compute_reward()
@@ -323,16 +323,16 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
 
     if memory.read_u8(DRIVE_DIR_ADDR) == 1:
         resetting = True
-        penalty = 7.5
+        penalty = .075
         reward -= penalty
         shm_array[0, 3] = reward
         reset_environment(initial=False)
         return
 
     # New low-speed reset condition:
-    if speed < 25:
+    if speed < 45:
         resetting = True
-        penalty = 5
+        penalty = .05
         reward -= penalty
         shm_array[0, 3] = reward
         reset_environment(initial=False)
@@ -420,7 +420,7 @@ def reset_environment(initial=False):
     else:
         reset_choice = random.randint(0, 4)
         if reset_choice == 1:
-            savestate.load_from_file(r"funky_flame_delfino_savestateGoodStart.sav")
+            savestate.load_from_file(r"funky_flame_delfino_savestate_startv2.sav")
         if reset_choice == 2:
             savestate.load_from_file(r"funky_flame_delfino_savestate2.sav")
         if reset_choice == 3:
@@ -434,7 +434,7 @@ def reset_environment(initial=False):
     while True:
         if shm_array[0, 1] == timestep:
             break
-        #time.sleep(0.01)
+        time.sleep(0.01)
 
     # Reset reward and terminal values.
     shm_array[0, 3] = 0.0  # Reward.

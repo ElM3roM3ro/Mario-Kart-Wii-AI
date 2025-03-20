@@ -244,7 +244,7 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
     fps_counter += 1
     current_time = time.time()
     if current_time - last_fps_time >= 1.0:
-        print(f"FPS: {fps_counter}")
+        print(f"SINGLE AGENT FILE FPS: {fps_counter}")
         fps_counter = 0
         last_fps_time = current_time
 
