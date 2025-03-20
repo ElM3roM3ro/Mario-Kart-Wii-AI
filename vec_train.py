@@ -26,10 +26,11 @@ logging.basicConfig(
 )
 
 # ----- Shared Memory Parameters -----
-# These must match those used in your env_multi.py.
+# Previously, data_shape was (Ymem+1, Xmem) for one frame.
+# Now we store a stack of 4 frames, so we have 1 + 4*Ymem rows.
 Ymem = 78
-Xmem = 94  # shared memory holds extra debug columns in row 0; rows 1 onward hold flattened image data.
-data_shape = (Ymem + 1, Xmem)
+Xmem = 94  # shared memory holds extra debug columns in row 0.
+data_shape = (1 + 4 * Ymem, Xmem)
 
 # ----- Minimal Gym Wrapper for Dolphin -----
 # In this version, the env writes a flattened stack of 4 downsampled frames.
@@ -48,7 +49,7 @@ class DolphinWrapper(gym.Env):
         self.shm_array = np.ndarray(data_shape, dtype=np.float32, buffer=self.shm.buf)
 
     def _read_obs(self):
-        # Rows 1: end hold a flattened version of 4 frames.
+        # Rows 1: end hold the flattened version of 4 frames.
         flat_data = self.shm_array[1:, :].copy().astype(np.uint8)
         obs = flat_data.reshape(self.frame_stack, Ymem, Xmem)
         return obs
@@ -158,6 +159,7 @@ def read_shared_state(shm_array):
         if shm_array[0, 0] != t0:
             break
     flat_state = shm_array[1:, :].copy().astype(np.uint8)
+    # Reshape the flat state into (4, Ymem, Xmem)
     state = flat_state.reshape(4, Ymem, Xmem)
     reward = float(shm_array[0, 3])
     terminal = float(shm_array[0, 4])
@@ -201,7 +203,7 @@ def main():
     num_episodes = 1000
     max_steps_per_episode = 1000
 
-    # Simple replay buffer (non-shared) for training.
+    # Simple replay buffer (local, non-shared) for training.
     replay_buffer = []
 
     def store_transition(transition):
@@ -212,7 +214,7 @@ def main():
     # Training loop.
     for episode in range(num_episodes):
         obs = vec_env.reset()  # obs shape: (num_envs, 4, Ymem, Xmem)
-        # Optionally, you could upscale observations via preprocessing here.
+        # Optionally, you can upscale the observations via preprocessing.
         episode_rewards = np.zeros(num_envs)
         dones = [False] * num_envs
 
