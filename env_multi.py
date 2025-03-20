@@ -330,7 +330,7 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
         return
 
     # New low-speed reset condition:
-    if speed < 45:
+    if speed < 35:
         resetting = True
         penalty = .05
         reward -= penalty
