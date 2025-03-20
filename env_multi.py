@@ -171,53 +171,6 @@ def compute_shaping_reward(lap_progress, elapsed_time, last_lap_progress, last_e
         phi_old = LAMBDA * last_lap_progress - MU * last_elapsed_time
     return phi_new - phi_old
 
-# def compute_reward():
-#     """
-#     Computes a normalized reward including:
-#       - Progress-based reward.
-#       - Potential-based shaping.
-#       - Terminal bonus and drifting penalty.
-#     """
-#     global last_lap_progress, last_elapsed_time, last_action
-
-#     state = read_game_state()
-#     if state is None:
-#         return 0.0, 0.0, 0.0, 0.0
-
-#     speed = state['speed']
-#     lap_progress = state['lap_progress']
-#     elapsed_time = read_time()
-
-#     # --- Progress Reward ---
-#     base_reward = compute_progress_reward(lap_progress, last_lap_progress, speed)
-    
-#     # --- Potential-Based Shaping ---
-#     shaping_reward = compute_shaping_reward(lap_progress, elapsed_time, last_lap_progress, last_elapsed_time)
-    
-#     raw_reward = base_reward + shaping_reward
-
-#     # --- Terminal Bonus ---
-#     terminal = 0.0
-#     if lap_progress >= 4:
-#         raw_reward += TERMINAL_BONUS
-#         terminal = 1.0
-
-#     # --- Drifting Penalty ---
-#     drifting_actions = {3, 4, 5, 6, 7, 8}
-#     if last_action in drifting_actions and speed < DRIFT_SPEED_THRESHOLD:
-#         raw_reward -= DRIFTING_PENALTY
-
-#     if controller.get_wiimote_buttons(0)["A"] == True and timestep < 145:
-#         raw_reward -= PREMATURE_A_PENALTY
-
-#     # Update last progress and time for the next frame.
-#     last_lap_progress = lap_progress
-#     last_elapsed_time = elapsed_time
-
-#     normalized_reward = raw_reward / NORMALIZATION_FACTOR
-
-#     return float(normalized_reward), terminal, speed, lap_progress
-
 # Global variable to track the previous lap progress.
 last_lap_progress = None
 
