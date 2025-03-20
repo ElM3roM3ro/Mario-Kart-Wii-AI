@@ -242,7 +242,7 @@ def compute_reward():
     lap_progress = state['lap_progress']
     
     # Base reward from speed.
-    reward = speed / 1000
+    reward = speed / 2500
 
     # If this is the first call, just set last_lap_progress.
     if last_lap_progress is None:
@@ -252,9 +252,9 @@ def compute_reward():
     lap_diff = lap_progress - last_lap_progress
 
     # Add 0.1 reward for each 0.0143 increment.
-    if lap_diff >= 0.001:
-        num_increments = int(lap_diff / 0.001)
-        reward += 0.01 * num_increments
+    if lap_diff >= 0.0001:
+        num_increments = int(lap_diff / 0.0001)
+        reward += 0.0025 * num_increments
 
     # If lap progress crosses a whole number boundary, add a bonus of 10.
     if int(lap_progress) > int(last_lap_progress) and int(last_lap_progress) != 0:

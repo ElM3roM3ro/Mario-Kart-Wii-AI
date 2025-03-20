@@ -5,7 +5,7 @@ import numpy as np
 import subprocess
 import multiprocessing as mp
 from collections import deque
-from agent import RainbowDQN  # your agent implementation
+from agent import RainbowDQN  # your updated Rainbow DQN implementation
 import matplotlib.pyplot as plt
 
 # ----- Shared Memory Parameters -----
@@ -13,7 +13,7 @@ Ymem = 78
 Xmem = 94  # Must include extra debug columns (e.g., speed, lap_progress)
 data_shape = (Ymem + 1, Xmem)
 
-# ----- Helper Functions (as in single-agent train.py) -----
+# ----- Helper Functions -----
 from multiprocessing import shared_memory
 
 def wait_for_shared_memory(shm_name, timeout=60):
@@ -34,12 +34,11 @@ def wait_for_shared_memory(shm_name, timeout=60):
 def read_shared_state(shm_array):
     """
     Reads from shared memory:
-      Row 0: [timestep, timestep, action, reward, terminal, speed, lap_progress]
-      Rows 1: state as an image.
+      Row 0: metadata [timestep, timestep, action, reward, terminal, speed, lap_progress]
+      Rows 1: current frame (grayscale image).
     Returns:
       state (np.array), reward, terminal, speed, lap_progress.
     """
-    #print("Reading shared memory...")
     t0 = shm_array[0, 0]
     while True:
         time.sleep(0.05)
@@ -51,29 +50,36 @@ def read_shared_state(shm_array):
     terminal = float(shm_array[0, 4])
     speed = float(shm_array[0, 5])
     lap_progress = float(shm_array[0, 6])
-    #print(f"Shared state read: Reward = {reward}, Terminal = {terminal}, Speed = {speed}, Lap Progress = {lap_progress}")
     return state, reward, terminal, speed, lap_progress
 
-def preprocess_state(state):
+def preprocess_frame_stack(frame_stack):
     """
-    Converts a state (np.array) to a PyTorch tensor of shape (4,128,128) using GPU-based resizing.
+    Converts a list of numpy arrays (each representing a single game frame)
+    into a PyTorch tensor of shape (4, 128, 128) using GPU-based resizing.
     """
-    state_tensor = torch.from_numpy(state).unsqueeze(0).unsqueeze(0).float().to('cuda')
-    state_resized = torch.nn.functional.interpolate(state_tensor, size=(128, 128), mode='bilinear', align_corners=False)
-    stacked = state_resized.squeeze(0).repeat(4, 1, 1)
+    frames = []
+    for frame in frame_stack:
+        # Convert single frame to tensor and add a channel dimension.
+        frame_tensor = torch.from_numpy(frame).unsqueeze(0).float().to('cuda')
+        # Resize to 128x128.
+        frame_resized = torch.nn.functional.interpolate(frame_tensor.unsqueeze(0),
+                                                        size=(128, 128),
+                                                        mode='bilinear',
+                                                        align_corners=False).squeeze(0)
+        frames.append(frame_resized)
+    # Stack along the channel dimension.
+    stacked = torch.cat(frames, dim=0)  # Shape: (4, 128, 128)
     return stacked
 
 def write_action(shm_array, action):
     """Writes the selected action to shared memory (in column 2 of row 0)."""
-    #print(f"Writing action: {action}")
     shm_array[0, 2] = action
 
-# ----- New Helper: Save Stacked Tensor as PNG Images -----
 def save_stacked_tensor_as_png(worker_id, frame_count, tensor):
     """
     Saves the stacked tensor to a folder structured as:
       tensor_stacks/worker_{worker_id}/stack_{frame_count}/
-    Each of the 4 slices in the tensor is saved as a separate PNG image.
+    Each of the 4 channels is saved as a separate PNG image.
     """
     base_folder = "tensor_stacks"
     worker_folder = os.path.join(base_folder, f"worker_{worker_id}")
@@ -81,9 +87,7 @@ def save_stacked_tensor_as_png(worker_id, frame_count, tensor):
     stack_folder = os.path.join(worker_folder, f"stack_{frame_count}")
     os.makedirs(stack_folder, exist_ok=True)
     
-    # Save each slice (channel) as a separate image.
-    for idx in range(4):
-        # Convert the tensor slice to a NumPy array.
+    for idx in range(tensor.size(0)):
         img = tensor[idx].cpu().numpy()
         file_path = os.path.join(stack_folder, f"image_{idx}.png")
         plt.imsave(file_path, img, cmap='gray')
@@ -142,7 +146,7 @@ def launch_dolphin_for_worker(worker_id):
 
 # ----- Global Replay Buffer -----
 class GlobalReplayBuffer:
-    def __init__(self, capacity=50000):
+    def __init__(self, capacity=6000000):
         self.capacity = capacity
         self.buffer = mp.Manager().list()  # shared list among processes
         self.lock = mp.Lock()
@@ -191,21 +195,23 @@ def worker_process(worker_id, global_buffer, global_weights, episode_rewards):
         shm = wait_for_shared_memory(shm_name, timeout=60)
     except TimeoutError as e:
         print(f"Worker {worker_id}: {e}. Exiting worker process.")
-        return  # Exit gracefully
+        return
 
     shm_array = np.ndarray(data_shape, dtype=np.float32, buffer=shm.buf)
 
+    # Instantiate agent with new hyperparameters.
     agent = RainbowDQN(
         state_shape=(4, 128, 128),
         num_actions=14,
-        lr=1e-4,
-        buffer_size=50000,
-        batch_size=64,
+        lr=0.0001,
+        buffer_size=1000000,
+        batch_size=32,
         gamma=0.99,
-        v_min=-5.0,
-        v_max=10.0,
+        v_min=-1.0,
+        v_max=1.0,
         num_atoms=51,
-        target_update_interval=2000,
+        target_update_interval=1000,
+        n_steps=3,
         device='cuda'
     )
     if 'state_dict' in global_weights:
@@ -215,6 +221,12 @@ def worker_process(worker_id, global_buffer, global_weights, episode_rewards):
     local_frame_count = 0
     max_steps_per_episode = 1000
 
+    # Initialize frame buffer: fill with 4 copies of the first frame.
+    frame_buffer = deque(maxlen=4)
+    initial_frame, _, _, _, _ = read_shared_state(shm_array)
+    for _ in range(4):
+        frame_buffer.append(initial_frame)
+
     while True:
         episode_reward = 0.0
         steps = 0
@@ -222,17 +234,20 @@ def worker_process(worker_id, global_buffer, global_weights, episode_rewards):
 
         try:
             while not done and steps < max_steps_per_episode:
+                # Read new frame and update frame buffer.
                 state_np, reward, terminal, speed, lap_progress = read_shared_state(shm_array)
-                # Preprocess state and obtain the stacked tensor.
-                obs_tensor = preprocess_state(state_np)
-                # Uncomment the line below if you want to save PNG images.
+                frame_buffer.append(state_np)
+                obs_tensor = preprocess_frame_stack(list(frame_buffer))
+
+                # Uncomment the line below to save PNG images.
                 # save_stacked_tensor_as_png(worker_id, local_frame_count, obs_tensor)
-                
+
                 action = agent.select_action(obs_tensor)
                 write_action(shm_array, action)
 
                 next_state_np, _, terminal, _, _ = read_shared_state(shm_array)
-                next_obs_tensor = preprocess_state(next_state_np)
+                frame_buffer.append(next_state_np)
+                next_obs_tensor = preprocess_frame_stack(list(frame_buffer))
 
                 transition = (
                     obs_tensor.cpu().numpy(),
@@ -253,11 +268,13 @@ def worker_process(worker_id, global_buffer, global_weights, episode_rewards):
 
                 if terminal > 0:
                     print(f"Worker {worker_id}: Episode ended after {steps} steps. Total Reward = {episode_reward:.3f}")
+                    # Reinitialize frame buffer on terminal state.
+                    frame_buffer.clear()
+                    for _ in range(4):
+                        frame_buffer.append(next_state_np)
                     done = True
 
-            # At the end of the episode, print the cumulated reward
             print(f"Worker {worker_id}: Avg reward for this episode: {(episode_reward/steps):.3f}")
-            # Record episode reward in the reward log.
             episode_rewards.append(episode_reward)
             time.sleep(0.1)
         except Exception as e:
@@ -265,19 +282,20 @@ def worker_process(worker_id, global_buffer, global_weights, episode_rewards):
             time.sleep(1)
 
 # ----- Master Trainer Process -----
-def master_trainer(global_buffer, global_weights, loss_logs, num_updates=10000, batch_size=64, update_interval=2000, checkpoint_path='master_checkpoint.pt', checkpoint_interval=1000):
+def master_trainer(global_buffer, global_weights, loss_logs, num_updates=1000000, batch_size=32, update_interval=1000, checkpoint_path='master_checkpoint.pt', checkpoint_interval=1000):
     print("Master trainer: Initializing master network on CUDA.")
     master_agent = RainbowDQN(
         state_shape=(4, 128, 128),
         num_actions=14,
-        lr=1e-4,
-        buffer_size=50000,
+        lr=0.0001,
+        buffer_size=1000000,
         batch_size=batch_size,
         gamma=0.99,
-        v_min=-5.0,
-        v_max=10.0,
+        v_min=-1.0,
+        v_max=1.0,
         num_atoms=51,
         target_update_interval=update_interval,
+        n_steps=3,
         device='cuda'
     )
     optimizer = master_agent.optimizer
@@ -305,33 +323,33 @@ def master_trainer(global_buffer, global_weights, loss_logs, num_updates=10000, 
         master_agent.target_net.reset_noise()
 
         dist = master_agent.online_net(obs_batch)
-        dist = torch.log_softmax(dist, dim=2)
-        dist_action = dist.gather(1, actions.unsqueeze(2).expand(batch_size, 1, master_agent.num_atoms)).squeeze(1)
+        log_p = torch.log_softmax(dist, dim=2)
+        log_p_a = log_p.gather(1, actions.unsqueeze(2).expand(batch_size, 1, master_agent.num_atoms)).squeeze(1)
 
         with torch.no_grad():
             next_dist = master_agent.online_net(next_obs_batch)
             next_dist = torch.softmax(next_dist, dim=2)
-            q_values_next = torch.sum(next_dist * master_agent.support.view(1, 1, -1), dim=2)
-            best_actions = q_values_next.argmax(dim=1)
+            q_next = torch.sum(next_dist * master_agent.support.view(1, 1, -1), dim=2)
+            best_actions = q_next.argmax(dim=1)
             target_dist = master_agent.target_net(next_obs_batch)
             target_dist = torch.softmax(target_dist, dim=2)
             target_dist = target_dist[range(batch_size), best_actions]
 
-        Tz = rewards + (1.0 - dones) * master_agent.gamma * master_agent.support.view(1, -1)
+        Tz = rewards + (1 - dones) * master_agent.gamma * master_agent.support.view(1, -1)
         Tz = Tz.clamp(master_agent.v_min, master_agent.v_max)
         b = (Tz - master_agent.v_min) / master_agent.delta_z
         l = b.floor().long()
         u = b.ceil().long()
 
         offset = torch.linspace(0, (batch_size - 1) * master_agent.num_atoms, batch_size).long().unsqueeze(1).to('cuda')
-        target_dist_projected = torch.zeros_like(target_dist).to('cuda')
-        target_dist_projected.view(-1).index_add_(0, (l + offset).view(-1),
-                                                   (target_dist * (u.float() - b)).view(-1))
-        target_dist_projected.view(-1).index_add_(0, (u + offset).view(-1),
-                                                   (target_dist * (b - l.float())).view(-1))
+        target_proj = torch.zeros_like(target_dist).to('cuda')
+        target_proj.view(-1).index_add_(0, (l + offset).view(-1),
+                                         (target_dist * (u.float() - b)).view(-1))
+        target_proj.view(-1).index_add_(0, (u + offset).view(-1),
+                                         (target_dist * (b - l.float())).view(-1))
 
-        losses = -torch.sum(target_dist_projected * dist_action, dim=1)
-        loss = losses.mean()
+        loss = -(target_proj * log_p_a).sum(1)
+        loss = loss.mean()
 
         optimizer.zero_grad()
         loss.backward()
@@ -353,7 +371,7 @@ def master_trainer(global_buffer, global_weights, loss_logs, num_updates=10000, 
 
         if update_count % checkpoint_interval == 0:
             save_checkpoint(master_agent, optimizer, update_count, checkpoint_path)
-    
+
     print("Master trainer: Training finished.")
 
 # ----- Plotting Function -----
@@ -388,7 +406,7 @@ def plot_metrics(loss_logs, episode_rewards):
 # ----- Main Multi-Agent Launch -----
 def main():
     num_workers = 6  # Number of parallel Dolphin/agent instances.
-    global_buffer = GlobalReplayBuffer(capacity=50000)
+    global_buffer = GlobalReplayBuffer(capacity=6000000)
     manager = mp.Manager()
     global_weights = manager.dict()
     loss_logs = manager.list()
@@ -401,7 +419,7 @@ def main():
         workers.append(p)
 
     try:
-        master_trainer(global_buffer, global_weights, loss_logs, num_updates=1000000, batch_size=64)
+        master_trainer(global_buffer, global_weights, loss_logs, num_updates=1000000, batch_size=32)
     except KeyboardInterrupt:
         print("Interrupted by user.")
     except Exception as e:
