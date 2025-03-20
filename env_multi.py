@@ -111,23 +111,6 @@ def process_frame(width, height, data_bytes):
 last_lap_progress = None
 last_elapsed_time = None  # New global to track time from the previous step.
 
-def read_time():
-    """
-    Reads the in-game timer values (minutes, seconds, and milliseconds) and computes
-    the elapsed time in seconds.
-    Note: ms is multiplied by 100 per your comment; adjust if needed.
-    """
-    try:
-        minutes = memory.read_f32(MINUTES_ADDR)
-        seconds = memory.read_f32(SECONDS_ADDR)
-        ms = memory.read_f32(MILLISECONDS_ADDR) * 100  # Adjust if necessary.
-        # Convert ms to seconds.
-        elapsed_time = minutes * 60 + seconds + ms / 1000.0
-        return elapsed_time
-    except Exception as e:
-        print("Error reading time:", e)
-        return 0.0
-
 # --- Configurable Parameters ---
 PROGRESS_UNIT = 0.0143          # Reward unit per 0.1 progress increment.
 SPEED_SCALE = 50.0             # Scale factor for speed in progress reward.
@@ -139,37 +122,6 @@ DRIFT_SPEED_THRESHOLD = 45.0   # Speed below which drifting is penalized.
 NORMALIZATION_FACTOR = 1000.0   # Adjust as needed (was commented as 800, so confirm the intended scale).
 LAMBDA = 1.0                 # Scaling factor for lap progress in potential.
 MU = 0.5                     # Scaling factor for elapsed time in potential.
-
-# --- Modular Reward Components ---
-
-def compute_progress_reward(lap_progress, last_lap_progress, speed):
-    """Calculate the reward based on lap progress increments, bonus for whole numbers, and speed bonus."""
-    if last_lap_progress is None:
-        return 0.0
-    lap_diff = max(0.0, lap_progress - last_lap_progress)
-    progress_reward = (lap_diff / PROGRESS_UNIT) * (speed / SPEED_SCALE)
-    
-    # Bonus for crossing whole number boundaries.
-    whole_bonus = 0
-    if last_lap_progress is not None:
-        last_whole = int(last_lap_progress)
-        current_whole = int(lap_progress)
-        if current_whole > last_whole:
-            if last_whole >= 1:
-                whole_bonus = current_whole - last_whole
-            
-    # Additional bonus for speed above threshold.
-    speed_bonus = (speed - SPEED_THRESHOLD) if speed >= SPEED_THRESHOLD else 0
-    return progress_reward + whole_bonus + speed_bonus
-
-def compute_shaping_reward(lap_progress, elapsed_time, last_lap_progress, last_elapsed_time):
-    """Compute the potential-based shaping reward."""
-    phi_new = LAMBDA * lap_progress - MU * elapsed_time
-    if last_lap_progress is None or last_elapsed_time is None:
-        phi_old = 0.0
-    else:
-        phi_old = LAMBDA * last_lap_progress - MU * last_elapsed_time
-    return phi_new - phi_old
 
 # Global variable to track the previous lap progress.
 last_lap_progress = None
@@ -274,14 +226,6 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
     pil_state = pil_state.resize((Xmem, Ymem), Image.BILINEAR)
     state_down = np.array(pil_state)
     shm_array[1:, :] = state_down
-
-    # if memory.read_u8(DRIVE_DIR_ADDR) == 1:
-    #     resetting = True
-    #     penalty = .075
-    #     reward -= penalty
-    #     shm_array[0, 3] = reward
-    #     reset_environment(initial=False)
-    #     return
 
     # New low-speed reset condition:
     if speed < 45:
