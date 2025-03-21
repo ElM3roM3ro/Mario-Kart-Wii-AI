@@ -1,5 +1,3 @@
-# multi_agent_train.py
-
 import os
 import time
 import subprocess
@@ -10,9 +8,7 @@ import logging
 from multiprocessing import shared_memory
 from gym.vector import AsyncVectorEnv
 import gym
-from gym import spaces
 from PIL import Image
-
 from agent import RainbowDQN  # Your RainbowDQN implementation
 
 # ----- Logging Setup -----
@@ -26,15 +22,16 @@ logging.basicConfig(
 )
 
 # ----- Shared Memory Parameters -----
-# Previously, data_shape was (Ymem+1, Xmem) for one frame.
-# Now we store a stack of 4 frames, so we have 1 + 4*Ymem rows.
+# These match the single-agent files.
 Ymem = 78
-Xmem = 94  # shared memory holds extra debug columns in row 0.
-data_shape = (1 + 4 * Ymem, Xmem)
+Xmem = 94
+data_shape = (Ymem + 1, Xmem)
+# For vectorized environments, each worker uses its own shared memory name,
+# e.g., "dolphin_shared_0", "dolphin_shared_1", etc.
 
-# ----- Minimal Gym Wrapper for Dolphin -----
-# In this version, the env writes a flattened stack of 4 downsampled frames.
-# We reshape these rows into an observation of shape (4, Ymem, Xmem).
+# ----- DolphinWrapper (as defined in vec_env.py) -----
+import collections
+
 class DolphinWrapper(gym.Env):
     metadata = {'render.modes': ['human']}
 
@@ -42,29 +39,36 @@ class DolphinWrapper(gym.Env):
         super(DolphinWrapper, self).__init__()
         self.shm_name = shm_name
         self.frame_stack = frame_stack
-        # Observation: a stack of 4 frames, each of shape (Ymem, Xmem)
-        self.observation_space = spaces.Box(low=0, high=255, shape=(frame_stack, Ymem, Xmem), dtype=np.uint8)
-        self.action_space = spaces.Discrete(14)
+        self.observation_space = gym.spaces.Box(low=0, high=255, shape=(frame_stack, Ymem, Xmem), dtype=np.uint8)
+        self.action_space = gym.spaces.Discrete(14)
         self.shm = shared_memory.SharedMemory(name=self.shm_name)
         self.shm_array = np.ndarray(data_shape, dtype=np.float32, buffer=self.shm.buf)
+        self.frame_buffer = collections.deque(maxlen=frame_stack)
 
-    def _read_obs(self):
-        # Rows 1: end hold the flattened version of 4 frames.
-        flat_data = self.shm_array[1:, :].copy().astype(np.uint8)
-        obs = flat_data.reshape(self.frame_stack, Ymem, Xmem)
-        return obs
+    def _read_single_frame(self):
+        frame = self.shm_array[1:, :].copy().astype(np.uint8)
+        return frame
+
+    def _get_obs(self):
+        return np.stack(list(self.frame_buffer), axis=0)
 
     def reset(self):
-        # Wait until a new timestep is written.
         t0 = self.shm_array[0, 0]
-        while True:
+        while self.shm_array[0, 0] == t0:
             time.sleep(0.05)
-            if self.shm_array[0, 0] != t0:
-                break
-        return self._read_obs()
+        self.frame_buffer.clear()
+        unique_frames = []
+        last_frame = None
+        while len(unique_frames) < self.frame_stack:
+            current_frame = self._read_single_frame()
+            if last_frame is None or not np.array_equal(current_frame, last_frame):
+                unique_frames.append(current_frame)
+                last_frame = current_frame
+            time.sleep(0.05)
+        self.frame_buffer = collections.deque(unique_frames, maxlen=self.frame_stack)
+        return self._get_obs()
 
     def step(self, action):
-        # Write action (stored in column 2 of row 0).
         self.shm_array[0, 2] = action
         t0 = self.shm_array[0, 0]
         timeout = 0
@@ -75,7 +79,9 @@ class DolphinWrapper(gym.Env):
             timeout += 1
             if timeout > 1000:
                 break
-        obs = self._read_obs()
+        new_frame = self._read_single_frame()
+        self.frame_buffer.append(new_frame)
+        obs = self._get_obs()
         reward = float(self.shm_array[0, 3])
         done = bool(self.shm_array[0, 4] > 0)
         info = {
@@ -85,15 +91,14 @@ class DolphinWrapper(gym.Env):
         return obs, reward, done, info
 
     def render(self, mode='human'):
-        obs = self._read_obs()
+        obs = self._get_obs()
         pil_img = Image.fromarray(obs[0])
         pil_img.show()
 
     def close(self):
         self.shm.close()
 
-# ----- Dolphin Launcher -----
-# These paths match your original settings.
+# ----- Dolphin Launcher for Worker Environments -----
 paths = {
     "dolphin_path": r"F:\DolphinEmuFork_src\dolphin\Binary\x64\Dolphin.exe",
     "script_path": r"F:\MKWii_Capstone_Project\UPDATED_MKWii_Capstone\Mario-Kart-Wii-AI\vec_env.py",
@@ -115,16 +120,13 @@ elif user == "Victor":
 def launch_dolphin_for_worker(worker_id):
     shm_name = f"dolphin_shared_{worker_id}"
     os.environ["SHM_NAME"] = shm_name
-
-    if user == "Nolan":
-        user_dir = f"C:\\Users\\nolan\\DolphinUserDirs\\instance_{worker_id}"
-    elif user == "Zach":
+    if user == "Zach":
         user_dir = f"C:\\Users\\Zachary\\DolphinUserDirs\\instance_{worker_id}"
+    elif user == "Nolan":
+        user_dir = f"C:\\Users\\nolan\\DolphinUserDirs\\instance_{worker_id}"
     elif user == "Victor":
         user_dir = f"C:\\Users\\victo\\DolphinUserDirs\\instance_{worker_id}"
-
     os.makedirs(user_dir, exist_ok=True)
-
     cmd = (
         f'"{paths["dolphin_path"]}" '
         f'-u "{user_dir}" '
@@ -140,8 +142,8 @@ def launch_dolphin_for_worker(worker_id):
 # ----- Preprocessing Function -----
 def preprocess_frame_stack(frame_stack):
     """
-    Converts a stack of frames (shape: (4, Ymem, Xmem)) into a PyTorch tensor of shape (4, 128, 128)
-    using GPU-based interpolation.
+    Upscales each frame from (Ymem, Xmem) to (128, 128) using GPU bilinear interpolation.
+    Returns a tensor of shape (4, 128, 128).
     """
     frames = []
     for frame in frame_stack:
@@ -151,36 +153,19 @@ def preprocess_frame_stack(frame_stack):
     stacked = torch.cat(frames, dim=0)
     return stacked
 
-# ----- Helper Function to Read Shared State -----
-def read_shared_state(shm_array):
-    t0 = shm_array[0, 0]
-    while True:
-        time.sleep(0.05)
-        if shm_array[0, 0] != t0:
-            break
-    flat_state = shm_array[1:, :].copy().astype(np.uint8)
-    # Reshape the flat state into (4, Ymem, Xmem)
-    state = flat_state.reshape(4, Ymem, Xmem)
-    reward = float(shm_array[0, 3])
-    terminal = float(shm_array[0, 4])
-    speed = float(shm_array[0, 5])
-    lap_progress = float(shm_array[0, 6])
-    return state, reward, terminal, speed, lap_progress
-
 # ----- Create Vectorized Environment -----
 def make_env_fn(worker_id):
     def _init():
         return DolphinWrapper(shm_name=f"dolphin_shared_{worker_id}")
     return _init
 
-# ----- Main Training Loop -----
 def main():
     num_envs = 4  # For example, use 4 parallel Dolphin instances.
     # Launch Dolphin instances.
     for i in range(num_envs):
         launch_dolphin_for_worker(i)
     # Allow time for Dolphin to initialize and create shared memory.
-    time.sleep(10)
+    time.sleep(3)
     env_fns = [make_env_fn(i) for i in range(num_envs)]
     vec_env = AsyncVectorEnv(env_fns)
 
@@ -189,21 +174,21 @@ def main():
         state_shape=(4, 128, 128),
         num_actions=14,
         num_atoms=51,
-        v_min=-1.0,
-        v_max=1.0,
+        v_min=-0.5,
+        v_max=275.0,
         gamma=0.99,
         lr=1e-4,
-        buffer_size=100000,
+        buffer_size=1000000,
         batch_size=32,
         target_update_interval=1000,
         n_steps=3,
         device='cuda' if torch.cuda.is_available() else 'cpu'
     )
 
-    num_episodes = 1000
+    num_episodes = 1000000
     max_steps_per_episode = 1000
 
-    # Simple replay buffer (local, non-shared) for training.
+    # A simple local replay buffer (for demonstration purposes).
     replay_buffer = []
 
     def store_transition(transition):
@@ -214,14 +199,13 @@ def main():
     # Training loop.
     for episode in range(num_episodes):
         obs = vec_env.reset()  # obs shape: (num_envs, 4, Ymem, Xmem)
-        # Optionally, you can upscale the observations via preprocessing.
         episode_rewards = np.zeros(num_envs)
         dones = [False] * num_envs
 
         for step in range(max_steps_per_episode):
             actions = []
             for i in range(num_envs):
-                # Preprocess: upscale from (4, Ymem, Xmem) to (4, 128, 128)
+                # Preprocess: upscale each frame from (Ymem, Xmem) to (128, 128)
                 obs_tensor = preprocess_frame_stack(obs[i])
                 action = agent.select_action(obs_tensor)
                 actions.append(action)
