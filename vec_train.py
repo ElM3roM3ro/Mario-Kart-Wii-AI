@@ -41,6 +41,16 @@ class DolphinWrapper(gym.Env):
         self.frame_stack = frame_stack
         self.observation_space = gym.spaces.Box(low=0, high=255, shape=(frame_stack, Ymem, Xmem), dtype=np.uint8)
         self.action_space = gym.spaces.Discrete(14)
+        # Poll for the shared memory segment
+        while True:
+            try:
+                self.shm = shared_memory.SharedMemory(name=self.shm_name)
+                break
+            except FileNotFoundError:
+                print(f"Shared memory {self.shm_name} not found. Waiting...")
+                time.sleep(1)
+        self.shm_array = np.ndarray(data_shape, dtype=np.float32, buffer=self.shm.buf)
+        self.frame_buffer = collections.deque(maxlen=frame_stack)
         self.shm = shared_memory.SharedMemory(name=self.shm_name)
         self.shm_array = np.ndarray(data_shape, dtype=np.float32, buffer=self.shm.buf)
         self.frame_buffer = collections.deque(maxlen=frame_stack)
@@ -119,7 +129,9 @@ elif user == "Victor":
 
 def launch_dolphin_for_worker(worker_id):
     shm_name = f"dolphin_shared_{worker_id}"
+    env_copy = os.environ["SHM_NAME"]
     os.environ["SHM_NAME"] = shm_name
+
     if user == "Zach":
         user_dir = f"C:\\Users\\Zachary\\DolphinUserDirs\\instance_{worker_id}"
     elif user == "Nolan":
@@ -135,7 +147,7 @@ def launch_dolphin_for_worker(worker_id):
         f'--save_state="{paths["savestate_path"]}" '
         f'--exec="{paths["game_path"]}"'
     )
-    subprocess.Popen(cmd, shell=True)
+    subprocess.Popen(cmd, shell=True, env=env_copy)
     logging.info(f"Worker {worker_id}: Launched Dolphin with command: {cmd}")
     return shm_name
 
