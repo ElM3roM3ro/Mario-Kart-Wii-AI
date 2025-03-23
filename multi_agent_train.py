@@ -274,7 +274,7 @@ def plot_metrics(loss_logs, episode_rewards):
 
 # ----- Main Training Loop -----
 def main():
-    num_envs = 8  # Number of parallel Dolphin instances
+    num_envs = 4  # Number of parallel Dolphin instances
     env = VecDolphinEnv(num_envs, frame_skip=4)
     agent = BTRAgent(
         state_shape=(4, 128, 128),
@@ -343,6 +343,20 @@ def main():
 
     except KeyboardInterrupt:
         logging.info("Training interrupted by user. Exiting...")
+        try:
+            result = subprocess.run(
+                'taskkill /F /IM Dolphin.exe',
+                check=True,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            print("Dolphin instances closed successfully:")
+            print(result.stdout)
+        except subprocess.CalledProcessError as e:
+            print("Error closing Dolphin instances:")
+            print(e.stderr)
     finally:
         plot_metrics(loss_logs, episode_rewards)
 
