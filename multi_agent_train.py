@@ -194,7 +194,7 @@ def worker_process(worker_id, global_buffer, global_weights, episode_rewards):
         logging.error(f"Worker {worker_id}: {e}. Exiting worker process.")
         return
     shm_array = np.ndarray(data_shape, dtype=np.float32, buffer=shm.buf)
-    # Create a local BTR agent with the new hyperparameters
+    # Create a local BTR agent with the new hyperparameters.
     agent = BTRAgent(
         state_shape=(4, 128, 128),
         num_actions=14,
@@ -202,7 +202,7 @@ def worker_process(worker_id, global_buffer, global_weights, episode_rewards):
         gamma=0.997,
         lr=1e-4,
         buffer_size=1000000,
-        batch_size=256,
+        batch_size=64,
         target_update_interval=500,
         n_steps=3,
         munchausen_alpha=0.9,
@@ -216,45 +216,62 @@ def worker_process(worker_id, global_buffer, global_weights, episode_rewards):
         logging.info(f"Worker {worker_id}: Loaded global weights.")
     local_frame_count = 0
     max_steps_per_episode = 1000
+    frame_skip = 4  # Repeat the selected action for 4 frames.
     frame_buffer = deque(maxlen=4)
-    # Initialize frame buffer with the first state
+    # Initialize frame buffer with the first observed state.
     initial_frame, _, _, _, _ = read_shared_state(shm_array)
     for _ in range(4):
         frame_buffer.append(initial_frame)
+    
+    # (Optional) n-step buffer for multi-step returns.
     n_step_buffer = deque(maxlen=agent.n_steps)
+
     while True:
         episode_reward = 0.0
         steps = 0
         done = False
         try:
             while not done and steps < max_steps_per_episode:
-                state_np, reward, terminal, speed, lap_progress = read_shared_state(shm_array)
-                frame_buffer.append(state_np)
+                # Get the current observation (4-frame stack) from the frame buffer.
                 obs_tensor = preprocess_frame_stack(list(frame_buffer))
+                # Agent selects an action based on the current 4-frame observation.
                 action = agent.select_action(obs_tensor)
                 write_action(shm_array, action)
-                next_state_np, next_reward, terminal, next_speed, next_lap_progress = read_shared_state(shm_array)
-                frame_buffer.append(next_state_np)
+                
+                total_reward = 0.0
+                # Repeat the selected action for the next 'frame_skip' frames.
+                for skip in range(frame_skip):
+                    state_np, reward, terminal, speed, lap_progress = read_shared_state(shm_array)
+                    frame_buffer.append(state_np)
+                    total_reward += reward
+                    steps += 1
+                    local_frame_count += 1
+                    episode_reward += reward
+                    # If a terminal condition is encountered during any skip, break early.
+                    if terminal > 0:
+                        break
+
+                # Build the next observation from the updated frame buffer.
                 next_obs_tensor = preprocess_frame_stack(list(frame_buffer))
-                # Create a single-step transition
+                # Create a transition with the accumulated reward and the new 4-frame stack.
                 transition = (
-                    obs_tensor.cpu().numpy().astype(np.uint8),  # state
+                    obs_tensor.cpu().numpy().astype(np.uint8),  # current state (stack)
                     action,
-                    reward,
-                    next_obs_tensor.cpu().numpy().astype(np.uint8),  # next state
+                    total_reward,  # accumulated reward over the skipped frames
+                    next_obs_tensor.cpu().numpy().astype(np.uint8),  # next state (stack)
                     terminal
                 )
                 agent.store_transition(transition)
-                local_frame_count += 1
-                steps += 1
-                episode_reward += reward
+                
+                # Periodically update local network weights.
                 if local_frame_count % 1000 == 0 and 'state_dict' in global_weights:
                     agent.online_net.load_state_dict(global_weights['state_dict'])
                     agent.online_net.to('cuda')
                     logging.info(f"Worker {worker_id}: Updated local weights at frame count {local_frame_count}")
+                
                 if terminal > 0:
                     logging.info(f"Worker {worker_id}: Episode ended after {steps} steps. Total Reward = {episode_reward:.3f}")
-                    # Flush any remaining transitions in the n-step buffer
+                    # Flush any remaining transitions in the n-step buffer if using multi-step returns.
                     while n_step_buffer:
                         n = len(n_step_buffer)
                         R = sum([agent.gamma ** i * n_step_buffer[i][2] for i in range(n)])
@@ -263,10 +280,12 @@ def worker_process(worker_id, global_buffer, global_weights, episode_rewards):
                         obs, action_val, _, _, _ = n_step_buffer[0]
                         global_buffer.store((obs, action_val, R, next_obs, done_flag), priority=1.0)
                         n_step_buffer.popleft()
+                    # Reset the frame buffer using the last observed state.
                     frame_buffer.clear()
                     for _ in range(4):
-                        frame_buffer.append(next_state_np)
+                        frame_buffer.append(state_np)
                     done = True
+
             logging.info(f"Worker {worker_id}: Avg reward for this episode: {(episode_reward/steps):.3f}")
             episode_rewards.append(episode_reward)
         except Exception as e:
@@ -396,7 +415,7 @@ def plot_metrics(loss_logs, episode_rewards):
 
 # ----- Main Multi-Agent Launch -----
 def main():
-    num_workers = 6  # Number of parallel Dolphin/agent instances.
+    num_workers = 8  # Number of parallel Dolphin/agent instances.
     manager = mp.Manager()
     global_buffer = GlobalPrioritizedReplayBuffer(capacity=num_workers * 1000000, alpha=0.2, manager=manager)
     global_weights = manager.dict()
@@ -409,7 +428,7 @@ def main():
         workers.append(p)
         logging.info(f"Started worker process {i}.")
     try:
-        master_trainer(global_buffer, global_weights, loss_logs, num_updates=1000000, batch_size=256)
+        master_trainer(global_buffer, global_weights, loss_logs, num_updates=1000000, batch_size=64)
     except KeyboardInterrupt:
         logging.info("Interrupted by user.")
     except Exception as e:

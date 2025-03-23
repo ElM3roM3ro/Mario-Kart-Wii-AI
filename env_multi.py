@@ -147,7 +147,7 @@ def compute_reward():
     lap_progress = state['lap_progress']
     
     # Base reward from speed.
-    reward = speed / 2500
+    reward = 0.0
 
     # If this is the first call, just set last_lap_progress.
     if last_lap_progress is None:
@@ -159,7 +159,7 @@ def compute_reward():
     # Add 0.1 reward for each 0.0143 increment.
     if lap_diff >= 0.0001:
         num_increments = int(lap_diff / 0.0001)
-        reward += 0.0025 * num_increments
+        reward += 0.01 * num_increments
 
     # If lap progress crosses a whole number boundary, add a bonus of 10.
     if int(lap_progress) > int(last_lap_progress) and int(last_lap_progress) != 0:
@@ -222,19 +222,27 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
     shm_array[0, 5] = speed
     shm_array[0, 6] = lap_progress
 
+    speed_reset = False
+    if speed < 65:
+        low_speed_counter += 1
+        shm_array[0, 3] -= .01
+
+    if low_speed_counter == 80:
+        speed_reset = True
+        
+    # New low-speed reset condition:
+    if speed < 65 and speed_reset == True:
+        resetting = True
+        penalty = 10
+        shm_array[0, 3] -= penalty
+        low_speed_counter = 0
+        reset_environment(initial=False)
+        return
+
     pil_state = Image.fromarray(state_img[0])
     pil_state = pil_state.resize((Xmem, Ymem), Image.BILINEAR)
     state_down = np.array(pil_state)
     shm_array[1:, :] = state_down
-
-    # New low-speed reset condition:
-    if speed < 45:
-        resetting = True
-        penalty = .5
-        reward -= penalty
-        shm_array[0, 3] = reward
-        reset_environment(initial=False)
-        return
 
     # Trigger reset if terminal condition is met and we're not already resetting.
     if terminal == 1.0 and not resetting:
