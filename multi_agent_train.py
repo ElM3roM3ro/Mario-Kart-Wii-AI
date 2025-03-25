@@ -24,6 +24,12 @@ Ymem = 78
 Xmem = 94  # Must include extra debug columns
 data_shape = (Ymem + 1, Xmem)
 
+# ----- Epsilon-Greedy Schedule Parameters -----
+EPSILON_START = 1.0
+EPSILON_END = 0.01
+EPSILON_DECAY_FRAMES = 2_000_000   # 2M frames
+EPSILON_DISABLED_FRAMES = 100_000_000  # 100M frames
+
 # ----- Helper Functions -----
 def wait_for_shared_memory(shm_name, timeout=60):
     """Wait until the shared memory is created by env_multi.py, up to timeout seconds."""
@@ -188,10 +194,39 @@ def load_checkpoint(agent):
         agent.update_count = checkpoint.get('update_count', 0)
         logging.info(f"Loaded checkpoint from {checkpoint_path}")
 
-def update_agent_and_log_loss(agent):
-    """Re-implements the update step (using agent.buffer which is the prioritized replay buffer)
-    and returns the loss value for logging."""
-    if len(agent.buffer.buffer) < agent.batch_size:
+
+def plot_metrics(loss_logs, episode_rewards):
+    if loss_logs:
+        updates, losses = zip(*loss_logs)
+        plt.figure()
+        plt.plot(updates, losses, label="Loss")
+        plt.xlabel("Update Count")
+        plt.ylabel("Loss")
+        plt.title("Loss vs Update Count")
+        plt.legend()
+        plt.savefig("loss_graph.png")
+        plt.close()
+        logging.info("Loss graph saved as loss_graph.png")
+    else:
+        logging.info("No loss logs to plot.")
+    if episode_rewards:
+        plt.figure()
+        plt.plot(range(len(episode_rewards)), episode_rewards, label="Episode Reward")
+        plt.xlabel("Episode")
+        plt.ylabel("Total Reward")
+        plt.title("Episode Reward Over Time")
+        plt.legend()
+        plt.savefig("reward_graph.png")
+        plt.close()
+        logging.info("Reward graph saved as reward_graph.png")
+    else:
+        logging.info("No episode rewards to plot.")
+
+# ... (imports and other helper functions remain unchanged)
+
+def update_agent_and_log_loss(agent, total_frames):
+    if len(agent.buffer.buffer) < 25000:
+        logging.info(f"Not training, buffer = {agent.buffer.buffer}")
         return None
     agent.online_net.train()
     agent.target_net.train()
@@ -224,66 +259,36 @@ def update_agent_and_log_loss(agent):
     td_error = target_expanded - current_quantiles.unsqueeze(2)
     huber_loss = agent._huber_loss(td_error, k=1.0)
     quantile_loss = (torch.abs(taus - (td_error.detach() < 0).float()) * huber_loss) / 1.0
-    # Compute per-sample losses (shape: [batch_size])
     sample_losses = quantile_loss.mean(dim=2).sum(dim=1)
-
-    # Compute overall loss as a weighted average
     loss = (sample_losses * weights.squeeze()).mean()
 
     agent.optimizer.zero_grad()
     loss.backward()
+    torch.nn.utils.clip_grad_norm_(agent.online_net.parameters(), 10)
     agent.optimizer.step()
 
-    # Use the per-sample losses for new priorities
     new_priorities = sample_losses.detach().abs().cpu() + 1e-6
     agent.buffer.update_priorities(indices, new_priorities)
 
     agent.update_count += 1
+    # When target update happens, log total accumulated frames.
     if agent.update_count % agent.target_update_interval == 0:
-        logging.info(f"Updating target net at update {agent.update_count}")
+        logging.info(f"Target network updated at update {agent.update_count} with total frames {total_frames}")
         agent.target_net.load_state_dict(agent.online_net.state_dict())
         save_checkpoint(agent, agent.update_count)
     return loss.item()
 
-def plot_metrics(loss_logs, episode_rewards):
-    if loss_logs:
-        updates, losses = zip(*loss_logs)
-        plt.figure()
-        plt.plot(updates, losses, label="Loss")
-        plt.xlabel("Update Count")
-        plt.ylabel("Loss")
-        plt.title("Loss vs Update Count")
-        plt.legend()
-        plt.savefig("loss_graph.png")
-        plt.close()
-        logging.info("Loss graph saved as loss_graph.png")
-    else:
-        logging.info("No loss logs to plot.")
-    if episode_rewards:
-        plt.figure()
-        plt.plot(range(len(episode_rewards)), episode_rewards, label="Episode Reward")
-        plt.xlabel("Episode")
-        plt.ylabel("Total Reward")
-        plt.title("Episode Reward Over Time")
-        plt.legend()
-        plt.savefig("reward_graph.png")
-        plt.close()
-        logging.info("Reward graph saved as reward_graph.png")
-    else:
-        logging.info("No episode rewards to plot.")
-
-# ----- Main Training Loop -----
 def main():
-    num_envs = 4  # Number of parallel Dolphin instances
+    num_envs = 6  # Using 8 parallel environments
     env = VecDolphinEnv(num_envs, frame_skip=4)
     agent = BTRAgent(
         state_shape=(4, 128, 128),
-        num_actions=8,
-        num_quantiles=32,
+        num_actions=8,  # Using 8 actions per your new action mapping
+        num_quantiles=8,
         gamma=0.997,
         lr=1e-4,
-        buffer_size=1000000,
-        batch_size=64,
+        buffer_size=1048576,
+        batch_size=256,
         target_update_interval=500,
         n_steps=3,
         munchausen_alpha=0.9,
@@ -291,32 +296,45 @@ def main():
         munchausen_clip=-1.0,
         device='cuda'
     )
-    # Load checkpoint if available
     load_checkpoint(agent)
     total_steps = 0
-    update_frequency = 50  # update every 50 steps
-    loss_logs = []       # (update count, loss)
-    episode_rewards = [] # list of episode total rewards
+    update_frequency = num_envs  # Update once every 64 environment steps
+    loss_logs = []       
+    episode_rewards = [] 
 
     try:
         while True:
-            # 1. For each environment, get the current observation from its frame buffer.
+            # 1. Gather observations from all environments.
             obs_list = []
             for i in range(num_envs):
                 obs_tensor = preprocess_frame_stack(list(env.frame_buffers[i]))
                 obs_list.append(obs_tensor.unsqueeze(0))
-            batch_obs = torch.cat(obs_list, dim=0).to('cuda')  # Shape: (num_envs, 4, 128, 128)
+            batch_obs = torch.cat(obs_list, dim=0).to('cuda')  # (num_envs, 4, 128, 128)
 
-            # 2. Select actions for all environments via a batched forward pass.
+            # 2. Compute current epsilon value based on total steps.
+            if total_steps < EPSILON_DECAY_FRAMES:
+                epsilon = EPSILON_START - (EPSILON_START - EPSILON_END) * (total_steps / EPSILON_DECAY_FRAMES)
+            elif total_steps < EPSILON_DISABLED_FRAMES:
+                epsilon = EPSILON_END
+            else:
+                epsilon = 0.0
+
+            # 3. Select actions using ε–greedy.
             with torch.no_grad():
-                quantiles, taus = agent.online_net(batch_obs)
+                quantiles, _ = agent.online_net(batch_obs)
                 q_mean = quantiles.mean(dim=1)
-                actions = q_mean.argmax(dim=1).cpu().numpy().tolist()
+                greedy_actions = q_mean.argmax(dim=1).cpu().numpy()
+            actions = []
+            for ga in greedy_actions:
+                if np.random.rand() < epsilon:
+                    actions.append(np.random.randint(0, agent.num_actions))
+                else:
+                    actions.append(int(ga))
 
-            # 3. Step all environments with the chosen actions (frame skipping handled inside).
+            # 4. Step all environments.
             next_obs_list, rewards, terminals = env.step(actions)
 
-            # 4. For each environment, store the transition using the agent's prioritized replay buffer.
+            # 5. Store transitions in the replay buffer.
             for i in range(num_envs):
                 transition = (
                     batch_obs[i].cpu().numpy().astype(np.uint8),  # current state
@@ -328,19 +346,19 @@ def main():
                 agent.store_transition(transition)
             total_steps += num_envs
 
-            # 5. Periodically update the agent and log loss.
-            loss_val = update_agent_and_log_loss(agent)
-            if loss_val is not None:
-                loss_logs.append((agent.update_count, loss_val))
-                logging.info(f"Update {agent.update_count}: Loss = {loss_val:.4f}")
+            # 6. Update the agent only every 'update_frequency' environment steps.
+            if total_steps % update_frequency == 0:
+                loss_val = agent.update(total_steps)
+                if loss_val is not None:
+                    loss_logs.append((agent.update_count, loss_val))
+                    logging.info(f"Update {agent.update_count}: Loss = {loss_val:.4f}")
 
-            # 6. If any environment signals episode termination, log reward and checkpoint.
+            # 7. Log and checkpoint at episode termination.
             for term, rew in zip(terminals, rewards):
                 if term > 0:
                     episode_rewards.append(rew)
                     logging.info(f"Episode ended with reward: {rew:.3f}")
                     save_checkpoint(agent, agent.update_count)
-
     except KeyboardInterrupt:
         logging.info("Training interrupted by user. Exiting...")
         try:

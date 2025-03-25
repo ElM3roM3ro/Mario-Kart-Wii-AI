@@ -1,9 +1,10 @@
 import math, random, numpy as np, torch, torch.nn as nn, torch.optim as optim
 from collections import deque
+import logging
 
-# ----------------- NoisyLinear (unchanged) ----------------- #
+# ----------------- NoisyLinear (with σ = 0.5) ----------------- #
 class NoisyLinear(nn.Module):
-    def __init__(self, in_features, out_features, sigma_init=0.1):
+    def __init__(self, in_features, out_features, sigma_init=0.5):  # changed sigma_init to 0.5
         super(NoisyLinear, self).__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -16,18 +17,21 @@ class NoisyLinear(nn.Module):
         self.sigma_init = sigma_init
         self.reset_parameters()
         self.reset_noise()
+        
     def reset_parameters(self):
         mu_range = 1 / math.sqrt(self.in_features)
         nn.init.uniform_(self.weight_mu, -mu_range, mu_range)
         nn.init.constant_(self.weight_sigma, self.sigma_init / math.sqrt(self.in_features))
         nn.init.uniform_(self.bias_mu, -mu_range, mu_range)
         nn.init.constant_(self.bias_sigma, self.sigma_init / math.sqrt(self.in_features))
+        
     def reset_noise(self):
         device = self.weight_mu.device
         eps_in = torch.randn(self.in_features, device=device).sign() * torch.sqrt(torch.abs(torch.randn(self.in_features, device=device)) + 1e-10)
         eps_out = torch.randn(self.out_features, device=device).sign() * torch.sqrt(torch.abs(torch.randn(self.out_features, device=device)) + 1e-10)
         self.weight_epsilon.copy_(eps_out.unsqueeze(1) * eps_in.unsqueeze(0))
         self.bias_epsilon.copy_(eps_out)
+        
     def forward(self, x):
         if self.training:
             weight = self.weight_mu + self.weight_sigma * self.weight_epsilon
@@ -37,42 +41,42 @@ class NoisyLinear(nn.Module):
             bias = self.bias_mu
         return nn.functional.linear(x, weight, bias)
 
-# ----------------- BTR Network with IQN and Impala blocks ----------------- #
+# ----------------- BTR Network with IQN and Impala Blocks ----------------- #
 class BTRNetwork(nn.Module):
-    def __init__(self, in_channels=4, num_actions=14, num_quantiles=32, n_cos=64, hidden=512):
+    def __init__(self, in_channels=4, num_actions=14, num_quantiles=8, n_cos=64, hidden=512):
         super(BTRNetwork, self).__init__()
+        width_scale = 2  # Impala width scale factor
+
         # Impala-style feature extractor with spectral normalization and adaptive max pooling:
         self.conv1 = nn.Sequential(
-            nn.utils.spectral_norm(nn.Conv2d(in_channels, 32, kernel_size=8, stride=4)),
+            nn.utils.spectral_norm(nn.Conv2d(in_channels, 32 * width_scale, kernel_size=8, stride=4)),
             nn.ReLU()
         )
         self.conv2 = nn.Sequential(
-            nn.utils.spectral_norm(nn.Conv2d(32, 64, kernel_size=4, stride=2)),
+            nn.utils.spectral_norm(nn.Conv2d(32 * width_scale, 64 * width_scale, kernel_size=4, stride=2)),
             nn.ReLU()
         )
         self.conv3 = nn.Sequential(
-            nn.utils.spectral_norm(nn.Conv2d(64, 64, kernel_size=3, stride=1)),
+            nn.utils.spectral_norm(nn.Conv2d(64 * width_scale, 64 * width_scale, kernel_size=3, stride=1)),
             nn.ReLU()
         )
-        self.pool = nn.AdaptiveMaxPool2d((6,6))  # Fixed output: 6x6 feature map
-        self.feature_dim = 64 * 6 * 6
+        self.pool = nn.AdaptiveMaxPool2d((6, 6))  # Fixed output: 6x6 feature map
+        self.feature_dim = (64 * width_scale) * 6 * 6  # 128 * 6 * 6 = 4608
 
         # IQN: cosine embedding for tau samples
         self.n_cos = n_cos
         self.cos_embedding = nn.Linear(n_cos, self.feature_dim)
 
-        # Dueling streams with NoisyLinear layers
-        # Value stream outputs 1 number per quantile sample
+        # Dueling streams with NoisyLinear layers (using σ = 0.5)
         self.value_stream = nn.Sequential(
-            NoisyLinear(self.feature_dim, hidden, sigma_init=0.1),
+            NoisyLinear(self.feature_dim, hidden, sigma_init=0.5),
             nn.ReLU(),
-            NoisyLinear(hidden, 1, sigma_init=0.1)
+            NoisyLinear(hidden, 1, sigma_init=0.5)
         )
-        # Advantage stream outputs one number per action per quantile sample
         self.advantage_stream = nn.Sequential(
-            NoisyLinear(self.feature_dim, hidden, sigma_init=0.1),
+            NoisyLinear(self.feature_dim, hidden, sigma_init=0.5),
             nn.ReLU(),
-            NoisyLinear(hidden, num_actions, sigma_init=0.1)
+            NoisyLinear(hidden, num_actions, sigma_init=0.5)
         )
         self.num_actions = num_actions
         self.num_quantiles = num_quantiles
@@ -91,7 +95,7 @@ class BTRNetwork(nn.Module):
             taus = torch.rand(batch_size, self.num_quantiles, device=x.device)  # shape: (batch, num_quantiles)
 
         # Cosine embedding: compute phi(τ) = ReLU(Linear(cos(π * i * τ))) for i=1,…,n_cos
-        i_pi = torch.arange(1, self.n_cos+1, device=x.device).float() * math.pi
+        i_pi = torch.arange(1, self.n_cos + 1, device=x.device).float() * math.pi
         taus_expanded = taus.unsqueeze(-1)  # (batch, num_quantiles, 1)
         cos_emb = torch.cos(taus_expanded * i_pi)  # (batch, num_quantiles, n_cos)
         phi = torch.relu(self.cos_embedding(cos_emb))  # (batch, num_quantiles, feature_dim)
@@ -112,12 +116,13 @@ class BTRNetwork(nn.Module):
 
 # ----------------- Prioritized Replay Buffer (unchanged except PER α) ----------------- #
 class PrioritizedReplayBuffer:
-    def __init__(self, capacity=1000000, alpha=0.2):
+    def __init__(self, capacity=1048576, alpha=0.2):  # capacity updated to 1,048,576
         self.capacity = capacity
         self.alpha = alpha
         self.buffer = []
         self.priorities = []
         self.pos = 0
+        
     def store(self, transition, priority=1.0):
         if len(self.buffer) < self.capacity:
             self.buffer.append(transition)
@@ -126,6 +131,7 @@ class PrioritizedReplayBuffer:
             self.buffer[self.pos] = transition
             self.priorities[self.pos] = priority
         self.pos = (self.pos + 1) % self.capacity
+        
     def sample(self, batch_size, beta=0.4):
         total = len(self.buffer)
         prios = np.array(self.priorities) ** self.alpha
@@ -136,6 +142,7 @@ class PrioritizedReplayBuffer:
         weights = (total * total_prob) ** (-beta)
         weights /= weights.max()
         return samples, indices, torch.FloatTensor(weights).unsqueeze(1)
+    
     def update_priorities(self, indices, new_prios):
         for idx, prio in zip(indices, new_prios):
             self.priorities[idx] = prio.item()
@@ -143,13 +150,13 @@ class PrioritizedReplayBuffer:
 # ----------------- BTR Agent incorporating IQN and Munchausen RL ----------------- #
 class BTRAgent:
     def __init__(self,
-                 state_shape=(4,128,128),
+                 state_shape=(4, 128, 128),
                  num_actions=14,
-                 num_quantiles=32,
+                 num_quantiles=8,
                  gamma=0.997,
                  lr=1e-4,
-                 buffer_size=1000000,
-                 batch_size=32,
+                 buffer_size=1048576,
+                 batch_size=256,
                  target_update_interval=500,
                  n_steps=3,
                  munchausen_alpha=0.9,
@@ -210,9 +217,13 @@ class BTRAgent:
             self.buffer.store((obs, action, R, next_obs, done), priority=1.0)
             self.n_step_buffer.popleft()
 
-    def update(self):
-        if len(self.buffer.buffer) < self.batch_size:
-            return
+    def update(self, total_frames=None):
+        # Only update if a minimum of 200K transitions are in the replay buffer.
+        if len(self.buffer.buffer) < 25000:
+            if len(self.buffer.buffer) % 1000 == 0:
+                logging.info(f"{len(self.buffer.buffer)}")
+            return None
+
         self.online_net.train()
         self.target_net.train()
         samples, indices, weights = self.buffer.sample(self.batch_size, beta=0.4)
@@ -220,20 +231,18 @@ class BTRAgent:
         obs_batch, actions, rewards, next_obs_batch, dones = zip(*samples)
         obs_batch = torch.cat([torch.from_numpy(o).unsqueeze(0).float() for o in obs_batch]).to(self.device)
         next_obs_batch = torch.cat([torch.from_numpy(o).unsqueeze(0).float() for o in next_obs_batch]).to(self.device)
-        actions = torch.LongTensor(actions).to(self.device)  # shape: (batch,)
-        rewards = torch.FloatTensor(rewards).to(self.device)  # shape: (batch,)
-        dones = torch.FloatTensor(dones).to(self.device)      # shape: (batch,)
+        actions = torch.LongTensor(actions).to(self.device)
+        rewards = torch.FloatTensor(rewards).to(self.device)
+        dones = torch.FloatTensor(dones).to(self.device)
 
         # --- Current state quantile estimates ---
         quantiles, taus = self.online_net(obs_batch)  # (batch, num_quantiles, num_actions)
-        # Gather quantiles for the taken actions
         actions_expanded = actions.unsqueeze(1).unsqueeze(2).expand(-1, self.online_net.num_quantiles, 1)
         current_quantiles = quantiles.gather(2, actions_expanded).squeeze(2)  # (batch, num_quantiles)
 
         # --- Munchausen bonus ---
         q_values = quantiles.mean(dim=1)  # (batch, num_actions)
         logits = q_values / self.munchausen_tau
-        policy = torch.softmax(logits, dim=1)
         log_policy = torch.log_softmax(logits, dim=1)
         munchausen_bonus = torch.clamp(log_policy.gather(1, actions.unsqueeze(1)), min=self.munchausen_clip)
         rewards_aug = rewards + self.munchausen_alpha * munchausen_bonus.squeeze(1)
@@ -251,26 +260,36 @@ class BTRAgent:
         target_quantiles = target_quantiles.detach()
 
         # --- Quantile Huber loss ---
-        # taus: (batch, num_quantiles) -> (batch, num_quantiles, 1)
-        taus = taus.unsqueeze(2)
-        # Expand target: (batch, 1, num_quantiles)
-        target_expanded = target_quantiles.unsqueeze(1)
+        taus = taus.unsqueeze(2)  # (batch, num_quantiles, 1)
+        target_expanded = target_quantiles.unsqueeze(1)  # (batch, 1, num_quantiles)
         td_error = target_expanded - current_quantiles.unsqueeze(2)  # (batch, num_quantiles, num_quantiles)
         huber_loss = self._huber_loss(td_error, k=1.0)
         quantile_loss = (torch.abs(taus - (td_error.detach() < 0).float()) * huber_loss) / 1.0
-        loss = quantile_loss.mean(dim=2).sum(dim=1)
-        loss = (loss * weights.squeeze()).mean()
+        sample_losses = quantile_loss.mean(dim=2).sum(dim=1)
+        loss = (sample_losses * weights.squeeze()).mean()
 
+        # --- Gradient step with clipping ---
         self.optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.online_net.parameters(), 10)
         self.optimizer.step()
 
-        new_priorities = loss.detach().abs().cpu() + 1e-6
+        # --- Update priorities ---
+        new_priorities = sample_losses.detach().abs().cpu() + 1e-6
         self.buffer.update_priorities(indices, new_priorities)
 
         self.update_count += 1
+
+        # --- Logging ---
+        logging.info(f"Update {self.update_count}: Loss = {loss.item():.4f}")
         if self.update_count % self.target_update_interval == 0:
+            if total_frames is not None:
+                logging.info(f"Target network updated at update {self.update_count} with total frames {total_frames}")
+            else:
+                logging.info(f"Target network updated at update {self.update_count}")
             self.target_net.load_state_dict(self.online_net.state_dict())
+
+        return loss.item()
 
     def _huber_loss(self, x, k=1.0):
         cond = (x.abs() <= k).float()
