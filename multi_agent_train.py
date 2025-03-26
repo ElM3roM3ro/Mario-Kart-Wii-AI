@@ -46,21 +46,25 @@ def wait_for_shared_memory(shm_name, timeout=60):
             logging.info(f"Waiting for shared memory '{shm_name}' to be created...")
             time.sleep(1)
 
-def read_shared_state(shm_array):
+def read_shared_state(shm_array, timeout=12.0):
     """
-    Reads from shared memory:
+    Reads from shared memory with a timeout:
       Row 0: metadata [timestep, timestep, action, reward, terminal, speed, lap_progress]
       Rows 1: current frame (grayscale image).
-    Blocks until a new timestep is detected.
+    Blocks until a new timestep is detected or timeout is reached.
     Returns:
       state (np.array), reward, terminal, speed, lap_progress.
+    Raises TimeoutError if no update is detected within `timeout` seconds.
     """
     t0 = shm_array[0, 0]
+    start_time = time.time()
     while True:
         time.sleep(0.05)
         t = shm_array[0, 0]
         if t != t0:
             break
+        if time.time() - start_time > timeout:
+            raise TimeoutError("No update in shared memory; process may be unresponsive.")
     state = shm_array[1:, :].copy().astype(np.uint8)
     reward = float(shm_array[0, 3])
     terminal = float(shm_array[0, 4])
@@ -93,6 +97,8 @@ def write_action(shm_array, action):
 def launch_dolphin_for_worker(worker_id):
     """
     Launches a Dolphin instance for a given worker ID. Each instance uses its own shared memory name.
+    Returns:
+      (shm_name, process_handle)
     """
     shm_name = f"dolphin_shared_{worker_id}"
     os.environ["SHM_NAME"] = shm_name
@@ -119,9 +125,9 @@ def launch_dolphin_for_worker(worker_id):
         f'--save_state="{paths["savestate_path"]}" '
         f'--exec="{paths["game_path"]}"'
     )
-    subprocess.Popen(cmd, shell=True)
+    proc = subprocess.Popen(cmd, shell=False)
     logging.info(f"Vectorized Env {worker_id}: Launched Dolphin with command: {cmd}")
-    return shm_name
+    return shm_name, proc
 
 # ----- Vectorized Environment Wrapper with Frame Skipping -----
 class VecDolphinEnv:
@@ -131,9 +137,18 @@ class VecDolphinEnv:
         self.shm_arrays = []
         self.frame_buffers = []
         self.env_shms = []
+        self.process_handles = []
+        self.shm_names = []
+
+        # Phase 1: Launch all Dolphin processes.
         for i in range(num_envs):
-            shm_name = launch_dolphin_for_worker(i)
-            shm = wait_for_shared_memory(shm_name)
+            shm_name, proc = launch_dolphin_for_worker(i)
+            self.shm_names.append(shm_name)
+            self.process_handles.append(proc)
+
+        # Phase 2: Initialize all shared memory segments and frame buffers.
+        for i in range(num_envs):
+            shm = wait_for_shared_memory(self.shm_names[i])
             self.env_shms.append(shm)
             shm_array = np.ndarray(data_shape, dtype=np.float32, buffer=shm.buf)
             self.shm_arrays.append(shm_array)
@@ -143,6 +158,38 @@ class VecDolphinEnv:
             for _ in range(4):
                 fb.append(initial_frame)
             self.frame_buffers.append(fb)
+
+    def restart_worker(self, i):
+        """
+        Terminates and restarts the Dolphin process for environment index `i`.
+        Reinitializes the shared memory and frame buffer.
+        """
+        logging.error(f"Worker {i} not responding. Restarting worker and Dolphin process.")
+        # Terminate the existing process.
+        try:
+            self.process_handles[i].terminate()
+            self.process_handles[i].wait(timeout=15)
+        except Exception as e:
+            logging.error(f"Error terminating worker {i}: {e}")
+        # Launch a new Dolphin process.
+        shm_name, proc = launch_dolphin_for_worker(i)
+        self.shm_names[i] = shm_name
+        self.process_handles[i] = proc
+        # Wait for new shared memory.
+        shm = wait_for_shared_memory(shm_name)
+        self.env_shms[i] = shm
+        shm_array = np.ndarray(data_shape, dtype=np.float32, buffer=shm.buf)
+        self.shm_arrays[i] = shm_array
+        # Reset the frame buffer with an initial frame.
+        try:
+            initial_frame, _, _, _, _ = read_shared_state(shm_array)
+        except TimeoutError as e:
+            logging.error(f"Worker {i} failed to initialize after restart: {e}")
+            initial_frame = np.zeros((Ymem, Xmem), dtype=np.uint8)
+        fb = deque(maxlen=4)
+        for _ in range(4):
+            fb.append(initial_frame)
+        self.frame_buffers[i] = fb
 
     def step(self, actions):
         """
@@ -157,15 +204,28 @@ class VecDolphinEnv:
         for i in range(self.num_envs):
             acc_reward = 0.0
             term_flag = 0
-            # For frame skipping: repeat action for self.frame_skip frames
             for _ in range(self.frame_skip):
                 write_action(self.shm_arrays[i], actions[i])
-                state, reward, terminal, speed, lap_progress = read_shared_state(self.shm_arrays[i])
+                try:
+                    state, reward, terminal, speed, lap_progress = read_shared_state(self.shm_arrays[i], timeout=12.0)
+                except TimeoutError as e:
+                    logging.error(f"Worker {i} timeout: {e}")
+                    # Restart the hung worker.
+                    self.restart_worker(i)
+                    # After restart, try to get a state; if it fails again, mark as terminal.
+                    try:
+                        state, reward, terminal, speed, lap_progress = read_shared_state(self.shm_arrays[i], timeout=12.0)
+                    except TimeoutError:
+                        state = np.zeros((Ymem, Xmem), dtype=np.uint8)
+                        reward = 0.0
+                        terminal = 0
+                    #term_flag = 1
+                    break  # End frame skipping for this environment.
                 self.frame_buffers[i].append(state)
                 acc_reward += reward
                 if terminal > 0:
                     term_flag = 1
-                    break  # End frame skip early if terminal reached
+                    break
             total_rewards.append(acc_reward)
             terminals.append(term_flag)
             obs_tensor = preprocess_frame_stack(list(self.frame_buffers[i]))
@@ -194,7 +254,6 @@ def load_checkpoint(agent):
         agent.update_count = checkpoint.get('update_count', 0)
         logging.info(f"Loaded checkpoint from {checkpoint_path}")
 
-
 def plot_metrics(loss_logs, episode_rewards):
     if loss_logs:
         updates, losses = zip(*loss_logs)
@@ -222,68 +281,12 @@ def plot_metrics(loss_logs, episode_rewards):
     else:
         logging.info("No episode rewards to plot.")
 
-# ... (imports and other helper functions remain unchanged)
-
-def update_agent_and_log_loss(agent, total_frames):
-    if len(agent.buffer.buffer) < 25000:
-        logging.info(f"Not training, buffer = {agent.buffer.buffer}")
-        return None
-    agent.online_net.train()
-    agent.target_net.train()
-    samples, indices, weights = agent.buffer.sample(agent.batch_size, beta=0.4)
-    weights = weights.to(agent.device)
-    obs_batch, actions, rewards, next_obs_batch, dones = zip(*samples)
-    obs_batch = torch.cat([torch.from_numpy(o).unsqueeze(0).float() for o in obs_batch]).to(agent.device)
-    next_obs_batch = torch.cat([torch.from_numpy(o).unsqueeze(0).float() for o in next_obs_batch]).to(agent.device)
-    actions = torch.LongTensor(actions).to(agent.device)
-    rewards = torch.FloatTensor(rewards).to(agent.device)
-    dones = torch.FloatTensor(dones).to(agent.device)
-    quantiles, taus = agent.online_net(obs_batch)
-    actions_expanded = actions.unsqueeze(1).unsqueeze(2).expand(-1, agent.online_net.num_quantiles, 1)
-    current_quantiles = quantiles.gather(2, actions_expanded).squeeze(2)
-    q_values = quantiles.mean(dim=1)
-    logits = q_values / agent.munchausen_tau
-    log_policy = torch.log_softmax(logits, dim=1)
-    munchausen_bonus = torch.clamp(log_policy.gather(1, actions.unsqueeze(1)), min=agent.munchausen_clip)
-    rewards_aug = rewards + agent.munchausen_alpha * munchausen_bonus.squeeze(1)
-    next_quantiles_online, _ = agent.online_net(next_obs_batch)
-    next_q_values_online = next_quantiles_online.mean(dim=1)
-    best_actions = next_q_values_online.argmax(dim=1)
-    best_actions_expanded = best_actions.unsqueeze(1).unsqueeze(2).expand(-1, agent.online_net.num_quantiles, 1)
-    next_quantiles_target, _ = agent.target_net(next_obs_batch)
-    next_quantiles = next_quantiles_target.gather(2, best_actions_expanded).squeeze(2)
-    target_quantiles = rewards_aug.unsqueeze(1) + agent.gamma * next_quantiles * (1 - dones.unsqueeze(1))
-    target_quantiles = target_quantiles.detach()
-    taus = taus.unsqueeze(2)
-    target_expanded = target_quantiles.unsqueeze(1)
-    td_error = target_expanded - current_quantiles.unsqueeze(2)
-    huber_loss = agent._huber_loss(td_error, k=1.0)
-    quantile_loss = (torch.abs(taus - (td_error.detach() < 0).float()) * huber_loss) / 1.0
-    sample_losses = quantile_loss.mean(dim=2).sum(dim=1)
-    loss = (sample_losses * weights.squeeze()).mean()
-
-    agent.optimizer.zero_grad()
-    loss.backward()
-    torch.nn.utils.clip_grad_norm_(agent.online_net.parameters(), 10)
-    agent.optimizer.step()
-
-    new_priorities = sample_losses.detach().abs().cpu() + 1e-6
-    agent.buffer.update_priorities(indices, new_priorities)
-
-    agent.update_count += 1
-    # When target update happens, log total accumulated frames.
-    if agent.update_count % agent.target_update_interval == 0:
-        logging.info(f"Target network updated at update {agent.update_count} with total frames {total_frames}")
-        agent.target_net.load_state_dict(agent.online_net.state_dict())
-        save_checkpoint(agent, agent.update_count)
-    return loss.item()
-
 def main():
-    num_envs = 6  # Using 8 parallel environments
+    num_envs = 8  # Adjust number of parallel environments as needed
     env = VecDolphinEnv(num_envs, frame_skip=4)
     agent = BTRAgent(
         state_shape=(4, 128, 128),
-        num_actions=8,  # Using 8 actions per your new action mapping
+        num_actions=8,
         num_quantiles=8,
         gamma=0.997,
         lr=1e-4,
@@ -298,7 +301,7 @@ def main():
     )
     load_checkpoint(agent)
     total_steps = 0
-    update_frequency = num_envs  # Update once every 64 environment steps
+    update_frequency = num_envs  # Update every num_envs steps
     loss_logs = []       
     episode_rewards = [] 
 
@@ -346,7 +349,7 @@ def main():
                 agent.store_transition(transition)
             total_steps += num_envs
 
-            # 6. Update the agent only every 'update_frequency' environment steps.
+            # 6. Update the agent every 'update_frequency' steps.
             if total_steps % update_frequency == 0:
                 loss_val = agent.update(total_steps)
                 if loss_val is not None:
