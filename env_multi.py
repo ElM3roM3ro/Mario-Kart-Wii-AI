@@ -140,8 +140,8 @@ def compute_reward():
         last_lap_progress = lap_progress
 
     lap_diff = lap_progress - last_lap_progress
-    if lap_diff >= 0.1:
-        num_increments = int(lap_diff / 0.1)
+    if lap_diff >= 0.014:
+        num_increments = int(lap_diff / 0.014)
         reward += 1 * num_increments
 
     if int(lap_progress) > int(last_lap_progress) and int(last_lap_progress) != 0:
