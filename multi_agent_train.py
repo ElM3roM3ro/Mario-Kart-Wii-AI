@@ -247,6 +247,7 @@ def plot_metrics(loss_logs, episode_rewards):
         logging.info("No episode rewards to plot.")
 
 def main():
+    global total_frames
     num_envs = 8
     env = VecDolphinEnv(num_envs, frame_skip=4)
     agent = BTRAgent(
@@ -291,6 +292,7 @@ def main():
             with torch.no_grad():
                 quantiles, _ = agent.online_net(batch_obs)
                 q_mean = quantiles.mean(dim=1)
+                logging.info(f"Q-values: mean={q_mean.mean().item():.4f}, max={q_mean.max().item():.4f}, min={q_mean.min().item():.4f}")
                 greedy_actions = q_mean.argmax(dim=1).cpu().numpy()
             actions = []
             for ga in greedy_actions:
@@ -318,14 +320,18 @@ def main():
 
             avg_reward = 0.0
             if total_steps % update_frequency == 0:
-                loss_val = agent.update(total_steps)
+                loss_val = agent.update(total_frames)
+                max_reward = -1000.0
+                min_reward = 1000.0
                 for reward in rewards:
                     avg_reward += reward
+                    max_reward = max(max_reward, reward)
+                    min_reward = min(min_reward, reward)
                 avg_reward = avg_reward / num_envs
                 if loss_val is not None:
                     loss_logs.append((agent.update_count, loss_val))
                     episode_rewards.append(avg_reward)
-                    logging.info(f"Update {agent.update_count}: Loss = {loss_val:.4f}, Avg. Reward = {avg_reward}")
+                    logging.info(f"Update {agent.update_count}: Loss = {loss_val:.4f}, Avg. Reward = {avg_reward}, Min. Reward: {min_reward}, Max. Reward: {max_reward}")
                     
 
             if total_steps % 3125 == 0:

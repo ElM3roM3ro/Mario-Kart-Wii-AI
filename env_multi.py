@@ -140,15 +140,16 @@ def compute_reward():
         last_lap_progress = lap_progress
 
     lap_diff = lap_progress - last_lap_progress
-    if lap_diff >= 0.014:
-        num_increments = int(lap_diff / 0.014)
-        reward += 1 * num_increments
+    if lap_diff >= 0.01:
+        num_increments = int(lap_diff / 0.01)
+        reward += 1.0 * num_increments
+        last_lap_progress = lap_progress
 
     if int(lap_progress) > int(last_lap_progress) and int(last_lap_progress) != 0:
         reward += 3
 
     terminal = 1.0 if lap_progress >= 4.0 else 0.0
-    last_lap_progress = lap_progress
+    #last_lap_progress = lap_progress
 
     return float(reward), terminal, speed, lap_progress
 
@@ -202,6 +203,7 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
         penalty = 10
         shm_array[0, 3] -= penalty
         low_speed_counter = 0
+        #print(shm_array[0, 3])
         reset_environment(initial=False)
         return
 
@@ -215,6 +217,7 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
         resetting = True
         reset_environment(initial=False)
     
+    #print(shm_array[0, 3])
     # Read and apply new action from shared memory.
     new_action = int(shm_array[0, 2])
     apply_action(new_action)
@@ -240,13 +243,15 @@ def apply_action(action_index):
         # Wheelie: Press A; perform swing command.
         controller.set_wiimote_buttons(0, {"A": True, "B": False})
         controller.set_wiimote_swing(0, 0.0, 1.0, 0.0, 0.5, 16.0, 2.0, 0.0)
-        nunchuck_action = {"StickX": 0.0, "StickY": 0.0, "Z": False}
+        nunchuck_action = {"StickX": 0.0, "StickY": 1.0, "Z": False}
         controller.set_wii_nunchuk_buttons(0, nunchuck_action)
         return
     elif action_index == 7:
         # Use item: Press A; set Z True.
         controller.set_wiimote_buttons(0, {"A": True, "B": False})
         nunchuck_action = {"StickX": 0.0, "StickY": 0.0, "Z": True}
+        controller.set_wii_nunchuk_buttons(0, nunchuck_action)
+        nunchuck_action = {"StickX": 0.0, "StickY": 0.0, "Z": False}
         controller.set_wii_nunchuk_buttons(0, nunchuck_action)
         return
     # For drift actions, indices 1-6, press both A and B.

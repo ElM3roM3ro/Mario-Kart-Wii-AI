@@ -331,7 +331,7 @@ class BTRAgent:
     def update(self, total_frames=None):
         if len(self.buffer) < 25000:
             if len(self.buffer) % 1000 == 0:
-                logging.info(f"{len(self.buffer)}")
+                logging.info(f"Buffer size: {len(self.buffer)}")
             return None
 
         self.online_net.train()
@@ -340,38 +340,42 @@ class BTRAgent:
         weights = torch.FloatTensor(weights).to(self.device)
         obs_batch = obs_batch.float().to(self.device)
         next_obs_batch = next_obs_batch.float().to(self.device)
-        # Resize in one batched GPU operation from raw size (e.g., 78x94) to (128, 128)
+        # Resize from raw size (e.g., 78x94) to (128, 128)
         obs_batch = torch.nn.functional.interpolate(obs_batch, size=(128, 128), mode='bilinear', align_corners=False)
         next_obs_batch = torch.nn.functional.interpolate(next_obs_batch, size=(128, 128), mode='bilinear', align_corners=False)
         actions = actions.long().to(self.device)
         rewards = rewards.float().to(self.device)
         dones = dones.float().to(self.device)
 
+        # Compute current quantile estimates for taken actions
         quantiles, taus = self.online_net(obs_batch)
         actions_expanded = actions.unsqueeze(1).unsqueeze(2).expand(-1, self.online_net.num_quantiles, 1)
         current_quantiles = quantiles.gather(2, actions_expanded).squeeze(2)
 
+        # Munchausen bonus computation
         q_values = quantiles.mean(dim=1)
         logits = q_values / self.munchausen_tau
         log_policy = torch.log_softmax(logits, dim=1)
         munchausen_bonus = torch.clamp(log_policy.gather(1, actions.unsqueeze(1)), min=self.munchausen_clip)
         rewards_aug = rewards + self.munchausen_alpha * munchausen_bonus.squeeze(1)
 
-        next_quantiles_online, _ = self.online_net(next_obs_batch)
-        next_q_values_online = next_quantiles_online.mean(dim=1)
-        best_actions = next_q_values_online.argmax(dim=1)
-        best_actions_expanded = best_actions.unsqueeze(1).unsqueeze(2).expand(-1, self.online_net.num_quantiles, 1)
+        # --- Soft target backup using softmax policy ---
         next_quantiles_target, _ = self.target_net(next_obs_batch)
-        next_quantiles = next_quantiles_target.gather(2, best_actions_expanded).squeeze(2)
-
-        target_quantiles = rewards_aug.unsqueeze(1) + self.gamma * next_quantiles * (1 - dones.unsqueeze(1))
+        next_q_values_target = next_quantiles_target.mean(dim=1)  # shape: (batch, num_actions)
+        logits_next = next_q_values_target / self.munchausen_tau
+        pi_next = torch.softmax(logits_next, dim=1)  # soft policy over actions
+        pi_next_expanded = pi_next.unsqueeze(1)  # shape: (batch, 1, num_actions)
+        # Compute expected next quantile value as the weighted sum over actions
+        expected_next_quantiles = (next_quantiles_target * pi_next_expanded).sum(dim=2)  # (batch, num_quantiles)
+        target_quantiles = rewards_aug.unsqueeze(1) + self.gamma * expected_next_quantiles * (1 - dones.unsqueeze(1))
         target_quantiles = target_quantiles.detach()
 
-        taus = taus.unsqueeze(2)
-        target_expanded = target_quantiles.unsqueeze(1)
+        # Compute quantile regression loss between current and target quantiles
+        taus = taus.unsqueeze(2)  # (batch, num_quantiles, 1)
+        target_expanded = target_quantiles.unsqueeze(1)  # (batch, 1, num_quantiles)
         td_error = target_expanded - current_quantiles.unsqueeze(2)
         huber_loss = self._huber_loss(td_error, k=1.0)
-        quantile_loss = (torch.abs(taus - (td_error.detach() < 0).float()) * huber_loss) / 1.0
+        quantile_loss = torch.abs(taus - (td_error.detach() < 0).float()) * huber_loss
         sample_losses = quantile_loss.mean(dim=2).sum(dim=1)
         loss = (sample_losses * weights.squeeze()).mean()
 
@@ -384,13 +388,10 @@ class BTRAgent:
         self.buffer.update_priorities(indices, new_priorities)
 
         self.update_count += 1
-        logging.info(f"Update {self.update_count}: Loss = {loss.item():.4f}")
-        if self.update_count % self.target_update_interval == 0:
-            if total_frames is not None:
-                logging.info(f"Target network updated at update {self.update_count} with total frames {total_frames}")
-            else:
-                logging.info(f"Target network updated at update {self.update_count}")
+        #logging.info(f"Update {self.update_count}: Loss = {loss.item():.4f}")
+        if total_frames % 128000 == 0:
             self.target_net.load_state_dict(self.online_net.state_dict())
+            logging.info(f"Target network updated at update {self.update_count} with total frames {total_frames}")
 
         return loss.item()
 
