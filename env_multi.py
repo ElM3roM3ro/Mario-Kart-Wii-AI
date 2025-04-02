@@ -29,8 +29,8 @@ except ImportError:
     savestate = Dummy()
 
 # Shared memory parameters.
-Ymem = 78
-Xmem = 94  
+Ymem = 128
+Xmem = 128  
 # Shared memory layout (row 0):
 # [Dolphin timestep, Emulator timestep, action, reward, terminal, speed, lap_progress]
 # Rows 1: state (downsampled image data)
@@ -63,9 +63,6 @@ frame_buffer = collections.deque(maxlen=4)
 # 5: Full drift left
 # 6: Full drift right
 # 7: Use item
-#
-# For drift actions (indices 1-6), both A and B are pressed.
-# For wheelie and use item, only A is pressed.
 #
 current_action = 0  
 timestep = 0        
@@ -104,13 +101,13 @@ last_lap_progress = None
 last_elapsed_time = None  # To track time from the previous step.
 
 # --- Configurable Parameters ---
-PROGRESS_UNIT = 0.0143          # Reward unit per 0.1 progress increment.
-SPEED_SCALE = 50.0              # Scale factor for speed in progress reward.
-SPEED_THRESHOLD = 80.0          # Threshold for bonus speed reward.
-TERMINAL_BONUS = 10.0           # Bonus reward when lap_progress reaches terminal condition.
-DRIFTING_PENALTY = 1.0          # Penalty for drifting at low speed.
-PREMATURE_A_PENALTY = 1.0       # Penalty for holding A too early.
-DRIFT_SPEED_THRESHOLD = 45.0    # Speed below which drifting is penalized.
+PROGRESS_UNIT = 0.0143          
+SPEED_SCALE = 50.0              
+SPEED_THRESHOLD = 80.0          
+TERMINAL_BONUS = 10.0           
+DRIFTING_PENALTY = 1.0          
+PREMATURE_A_PENALTY = 1.0       
+DRIFT_SPEED_THRESHOLD = 45.0    
 NORMALIZATION_FACTOR = 1000.0
 LAMBDA = 1.0                 
 MU = 0.5                     
@@ -119,8 +116,8 @@ def compute_reward():
     """
     Simplified reward function:
       - Base reward: current speed.
-      - For every 0.001 increment in lap progress, add 0.01 reward.
-      - When lap progress crosses a whole number, add bonus of 10.
+      - For every 0.001 increment in lap progress, add 0.1 reward.
+      - When lap progress crosses a whole number, add bonus.
       - Terminal flag is set if lap_progress >= 4.
       
     Returns:
@@ -140,16 +137,16 @@ def compute_reward():
         last_lap_progress = lap_progress
 
     lap_diff = lap_progress - last_lap_progress
-    if lap_diff >= 0.01:
-        num_increments = int(lap_diff / 0.01)
-        reward += 1.0 * num_increments
+    if lap_diff >= 0.001:
+        num_increments = int(lap_diff / 0.001)
+        reward += 0.1 * num_increments
+
+        if int(lap_progress) > int(last_lap_progress) and int(last_lap_progress) != 0:
+            reward += 3
+        
         last_lap_progress = lap_progress
 
-    if int(lap_progress) > int(last_lap_progress) and int(last_lap_progress) != 0:
-        reward += 3
-
     terminal = 1.0 if lap_progress >= 4.0 else 0.0
-    #last_lap_progress = lap_progress
 
     return float(reward), terminal, speed, lap_progress
 
@@ -200,97 +197,72 @@ def on_framedrawn(width: int, height: int, data_bytes: bytes):
         
     if speed < 65 and speed_reset:
         resetting = True
-        penalty = 10
+        penalty = 2
         shm_array[0, 3] -= penalty
         low_speed_counter = 0
-        #print(shm_array[0, 3])
-        reset_environment(initial=False)
+        # Set terminal flag to signal reset due to speed penalty.
+        shm_array[0, 4] = 1.0
+        # Call reset_environment with preserve_terminal=True so we hold the terminal flag briefly.
+        reset_environment(initial=False, preserve_terminal=True)
         return
 
-    pil_state = Image.fromarray(state_img[0])
-    pil_state = pil_state.resize((Xmem, Ymem), Image.BILINEAR)
-    state_down = np.array(pil_state)
+    state_down = state_img[0]
     shm_array[1:, :] = state_down
 
     if terminal == 1.0 and not resetting:
-        print("Terminal condition reached. Initiating environment reset...")
+        #print("Terminal condition reached. Initiating environment reset...")
         resetting = True
         reset_environment(initial=False)
     
-    #print(shm_array[0, 3])
-    # Read and apply new action from shared memory.
     new_action = int(shm_array[0, 2])
     apply_action(new_action)
 
 event.on_framedrawn(on_framedrawn)
 
 def apply_action(action_index):
-    """
-    New action mapping:
-      0: Wheelie         -> Press A; send swing command.
-      1: Slight drift left   -> Press A and B; nunchuck StickX = -0.3.
-      2: Slight drift right  -> Press A and B; nunchuck StickX = 0.3.
-      3: More drift left     -> Press A and B; nunchuck StickX = -0.6.
-      4: More drift right    -> Press A and B; nunchuck StickX = 0.6.
-      5: Full drift left     -> Press A and B; nunchuck StickX = -1.0.
-      6: Full drift right    -> Press A and B; nunchuck StickX = 1.0.
-      7: Use item          -> Press A; set nunchuck Z True.
-    """
     global timestep, last_action
     last_action = action_index
 
     if action_index == 0:
-        # Wheelie: Press A; perform swing command.
         controller.set_wiimote_buttons(0, {"A": True, "B": False})
         controller.set_wiimote_swing(0, 0.0, 1.0, 0.0, 0.5, 16.0, 2.0, 0.0)
         nunchuck_action = {"StickX": 0.0, "StickY": 1.0, "Z": False}
         controller.set_wii_nunchuk_buttons(0, nunchuck_action)
         return
     elif action_index == 7:
-        # Use item: Press A; set Z True.
         controller.set_wiimote_buttons(0, {"A": True, "B": False})
         nunchuck_action = {"StickX": 0.0, "StickY": 0.0, "Z": True}
         controller.set_wii_nunchuk_buttons(0, nunchuck_action)
         nunchuck_action = {"StickX": 0.0, "StickY": 0.0, "Z": False}
         controller.set_wii_nunchuk_buttons(0, nunchuck_action)
         return
-    # For drift actions, indices 1-6, press both A and B.
-    elif action_index == 1:   # Slight drift left
+    elif action_index == 1:
         stick_action = {"StickX": -0.3, "StickY": 0.0, "Z": False}
-    elif action_index == 2:   # Slight drift right
+    elif action_index == 2:
         stick_action = {"StickX": 0.3, "StickY": 0.0, "Z": False}
-    elif action_index == 3:   # More drift left
+    elif action_index == 3:
         stick_action = {"StickX": -0.6, "StickY": 0.0, "Z": False}
-    elif action_index == 4:   # More drift right
+    elif action_index == 4:
         stick_action = {"StickX": 0.6, "StickY": 0.0, "Z": False}
-    elif action_index == 5:   # Full drift left
+    elif action_index == 5:
         stick_action = {"StickX": -1.0, "StickY": 0.0, "Z": False}
-    elif action_index == 6:   # Full drift right
+    elif action_index == 6:
         stick_action = {"StickX": 1.0, "StickY": 0.0, "Z": False}
     else:
         stick_action = {"StickX": 0.0, "StickY": 0.0, "Z": False}
 
-    # For drift actions, press both A and B.
     controller.set_wiimote_buttons(0, {"A": True, "B": True})
     controller.set_wii_nunchuk_buttons(0, stick_action)
 
-def reset_environment(initial=False):
-    """
-    Resets the environment.
-    If initial==True, no savestate is loaded (Dolphin already loaded the CLI savestate).
-    Otherwise, randomly select one savestate.
-    """
+def reset_environment(initial=False, preserve_terminal=False):
     global timestep, last_lap_progress, resetting, shm_array, frame_buffer
-
-    print("Resetting environment...")
+    #print("Resetting environment...")
     timestep = 0
     shm_array[0, 1] = timestep
     last_lap_progress = None
     frame_buffer.clear()
 
-    if initial:
-        print("Initial reset: Using CLI savestate.")
-    else:
+    if not initial:
         reset_choice = random.randint(1, 4)
         if reset_choice == 1:
             savestate.load_from_file(r"funky_flame_delfino_savestate_startv2.sav")
@@ -304,25 +276,23 @@ def reset_environment(initial=False):
     while True:
         if shm_array[0, 1] == timestep:
             break
-        time.sleep(0.01)
 
     shm_array[0, 3] = 0.0
+    #if preserve_terminal:
+        #time.sleep(0.0167)  # Brief pause to allow the terminal flag to be detected by the trainer.
+    # Always clear the terminal flag after reset.
     shm_array[0, 4] = 0.0
     shm_array[1:, :] = np.zeros((Ymem, Xmem), dtype=np.float32)
     
     timestep += 1
     shm_array[0, 0] = timestep
 
-    print("Environment reset complete.")
+    #print("Environment reset complete.")
     resetting = False
-
-def main_loop():
-    while True:
-        time.sleep(0.03)
-        current_action = int(shm_array[0, 2])
-        apply_action(current_action)
 
 reset_environment(initial=True)
 
-import threading
-threading.Thread(target=main_loop, daemon=True).start()
+while True:
+    await event.framedrawn()
+    current_action = int(shm_array[0, 2])
+    apply_action(current_action)

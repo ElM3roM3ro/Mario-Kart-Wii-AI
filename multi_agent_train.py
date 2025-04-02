@@ -9,6 +9,7 @@ from collections import deque
 from agent import BTRAgent  # Agent now uses the new PER with LazyFrames
 from multiprocessing import shared_memory
 from gym.wrappers import LazyFrames
+import concurrent.futures
 
 # ----- Logging Setup -----
 logging.basicConfig(
@@ -21,8 +22,8 @@ logging.basicConfig(
 )
 
 # ----- Shared Memory Parameters -----
-Ymem = 78
-Xmem = 94  # Must include extra debug columns
+Ymem = 128
+Xmem = 128  # Must include extra debug columns
 data_shape = (Ymem + 1, Xmem)
 
 # ----- Epsilon-Greedy Schedule Parameters -----
@@ -50,7 +51,7 @@ def read_shared_state(shm_array, timeout=12.0):
     t0 = shm_array[0, 0]
     start_time = time.time()
     while True:
-        time.sleep(0.05)
+        time.sleep(0.0167)
         t = shm_array[0, 0]
         if t != t0:
             break
@@ -67,13 +68,7 @@ def preprocess_frame_stack(frame_stack):
     frames = []
     for frame in frame_stack:
         frame_tensor = torch.from_numpy(frame).unsqueeze(0).float().to('cuda')
-        frame_resized = torch.nn.functional.interpolate(
-            frame_tensor.unsqueeze(0),
-            size=(128, 128),
-            mode='bilinear',
-            align_corners=False
-        ).squeeze(0)
-        frames.append(frame_resized)
+        frames.append(frame_tensor)
     stacked = torch.cat(frames, dim=0)  # Shape: (4, 128, 128)
     return stacked
 
@@ -120,6 +115,7 @@ class VecDolphinEnv:
         self.env_shms = []
         self.process_handles = []
         self.shm_names = []
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.num_envs)
 
         for i in range(num_envs):
             shm_name, proc = launch_dolphin_for_worker(i)
@@ -136,7 +132,7 @@ class VecDolphinEnv:
             for _ in range(4):
                 fb.append(initial_frame)
             self.frame_buffers.append(fb)
-
+    
     def restart_worker(self, i):
         logging.error(f"Worker {i} not responding. Restarting worker and Dolphin process.")
         try:
@@ -163,14 +159,16 @@ class VecDolphinEnv:
 
     def step(self, actions):
         global total_frames
-        next_obs = []
-        total_rewards = []
-        terminals = []
-        for i in range(self.num_envs):
+        next_obs = [None] * self.num_envs
+        total_rewards = [0.0] * self.num_envs
+        terminals = [0] * self.num_envs
+
+        def worker_step(i, action):
             acc_reward = 0.0
             term_flag = 0
+            last_state = None
             for _ in range(self.frame_skip):
-                write_action(self.shm_arrays[i], actions[i])
+                write_action(self.shm_arrays[i], action)
                 try:
                     state, reward, terminal, speed, lap_progress = read_shared_state(self.shm_arrays[i], timeout=12.0)
                 except TimeoutError as e:
@@ -182,20 +180,45 @@ class VecDolphinEnv:
                         state = np.zeros((Ymem, Xmem), dtype=np.uint8)
                         reward = 0.0
                         terminal = 0
-                    break
+                        break
+                last_state = state
                 self.frame_buffers[i].append(state)
                 acc_reward += reward
                 if terminal > 0:
                     term_flag = 1
                     break
-            total_rewards.append(acc_reward)
-            terminals.append(term_flag)
+            if term_flag:
+                fb = deque(maxlen=4)
+                for _ in range(4):
+                    fb.append(last_state)
+                self.frame_buffers[i] = fb
             obs_tensor = preprocess_frame_stack(list(self.frame_buffers[i]))
-            next_obs.append(obs_tensor)
-            total_frames += (4 * 8)
-            if total_frames % 1000 == 0:
-                logging.info(f"Frames: {total_frames}")
+            return i, obs_tensor, acc_reward, term_flag
+
+        futures = []
+        for i in range(self.num_envs):
+            futures.append(self.executor.submit(worker_step, i, actions[i]))
+        for future in concurrent.futures.as_completed(futures):
+            i, obs_tensor, acc_reward, term_flag = future.result()
+            next_obs[i] = obs_tensor
+            total_rewards[i] = acc_reward
+            terminals[i] = term_flag
+
+        total_frames += (self.frame_skip * self.num_envs)
+        if total_frames % 4000 == 0:
+            logging.info(f"Frames: {total_frames}")
         return next_obs, total_rewards, terminals
+
+    def close(self):
+        """Close and unlink all shared memory objects."""
+        self.executor.shutdown(wait=True)
+        for shm in self.env_shms:
+            try:
+                shm.close()
+                shm.unlink()
+                logging.info(f"Closed and unlinked shared memory: {shm.name}")
+            except Exception as e:
+                logging.error(f"Error closing shared memory {shm.name}: {e}")
 
 # ----- Loss Logging & Checkpointing Utilities -----
 checkpoint_path = "vectorized_checkpoint.pt"
@@ -249,32 +272,32 @@ def plot_metrics(loss_logs, episode_rewards):
 def main():
     global total_frames
     num_envs = 8
-    env = VecDolphinEnv(num_envs, frame_skip=4)
-    agent = BTRAgent(
-        state_shape=(4, 128, 128),
-        num_actions=8,
-        num_quantiles=8,
-        gamma=0.997,
-        lr=1e-4,
-        buffer_size=1048576,
-        batch_size=256,
-        target_update_interval=500,
-        n_steps=3,
-        munchausen_alpha=0.9,
-        munchausen_tau=0.03,
-        munchausen_clip=-1.0,
-        device='cuda',
-        parallel_envs=num_envs
-    )
-    load_checkpoint(agent)
-    total_steps = 0
-    update_frequency = num_envs
-    loss_logs = []       
-    episode_rewards = [] 
-
+    env = None
     try:
+        env = VecDolphinEnv(num_envs, frame_skip=4)
+        agent = BTRAgent(
+            state_shape=(4, 128, 128),
+            num_actions=8,
+            num_quantiles=8,
+            gamma=0.997,
+            lr=1e-4,
+            buffer_size=1048576,
+            batch_size=256,
+            target_update_interval=500,
+            n_steps=3,
+            munchausen_alpha=0.9,
+            munchausen_tau=0.03,
+            munchausen_clip=-1.0,
+            device='cuda',
+            parallel_envs=num_envs
+        )
+        load_checkpoint(agent)
+        total_steps = 0
+        update_frequency = num_envs
+        loss_logs = []
+        episode_rewards = []
+
         while True:
-            # Capture the current state for each environment as LazyFrames.
             current_states = [LazyFrames(list(env.frame_buffers[i])) for i in range(num_envs)]
             obs_list = []
             for i in range(num_envs):
@@ -301,48 +324,41 @@ def main():
                 else:
                     actions.append(int(ga))
 
-            # Step the environments.
             next_obs_list, rewards, terminals = env.step(actions)
             total_steps += num_envs
-            # Capture next states (after stepping) as LazyFrames.
             next_states = [LazyFrames(list(env.frame_buffers[i])) for i in range(num_envs)]
 
-            # Store transitions: (current_state, next_state, action, reward, terminal)
             for i in range(num_envs):
                 transition = (
-                    current_states[i],  # state
-                    actions[i],         # action
-                    rewards[i],         # reward
-                    terminals[i],       # done
-                    next_states[i]      # next_state
+                    current_states[i],
+                    actions[i],
+                    rewards[i],
+                    terminals[i],
+                    next_states[i]
                 )
                 agent.buffer.put(*transition, j=i)
 
-            avg_reward = 0.0
+            avg_reward = sum(rewards)/num_envs
             if total_steps % update_frequency == 0:
                 loss_val = agent.update(total_frames)
-                max_reward = -1000.0
-                min_reward = 1000.0
-                for reward in rewards:
-                    avg_reward += reward
-                    max_reward = max(max_reward, reward)
-                    min_reward = min(min_reward, reward)
-                avg_reward = avg_reward / num_envs
+                max_reward = max(rewards)
+                min_reward = min(rewards)
                 if loss_val is not None:
                     loss_logs.append((agent.update_count, loss_val))
                     episode_rewards.append(avg_reward)
                     logging.info(f"Update {agent.update_count}: Loss = {loss_val:.4f}, Avg. Reward = {avg_reward}, Min. Reward: {min_reward}, Max. Reward: {max_reward}")
-                    
 
             if total_steps % 3125 == 0:
                 logging.info(f"Saving checkpoint at step: {total_steps}")
                 save_checkpoint(agent, agent.update_count)
 
+            i = 0
             for term, rew in zip(terminals, rewards):
                 if term > 0:
                     episode_rewards.append(rew)
-                    logging.info(f"Episode ended with reward: {rew:.3f}")
-                    save_checkpoint(agent, agent.update_count)
+                    #logging.info(f"Worker {i}: episode ended with reward: {rew:.3f}")
+                    #save_checkpoint(agent, agent.update_count)
+                i += 1
     except KeyboardInterrupt:
         logging.info("Training interrupted by user. Exiting...")
         try:
@@ -361,6 +377,8 @@ def main():
             print(e.stderr)
     finally:
         plot_metrics(loss_logs, episode_rewards)
+        if env is not None:
+            env.close()
 
 if __name__ == "__main__":
     main()
