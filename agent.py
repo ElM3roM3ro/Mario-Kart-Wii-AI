@@ -170,6 +170,7 @@ class BTRAgent:
         self.eval_mode = False
         if self.loading_checkpoint:
             self.load_models("insert_model_name")
+        self.scaler = torch.amp.GradScaler()
     
     def get_grad_steps(self):
         return self.grad_steps
@@ -250,42 +251,43 @@ class BTRAgent:
         idxs, states, actions, rewards, next_states, dones, weights = self.memory.sample(self.batch_size)
         self.optimizer.zero_grad()
 
-        if self.iqn and self.munchausen:
-            with torch.no_grad():
-                Q_targets_next, _ = self.tgt_net(next_states)
-                q_t_n = Q_targets_next.mean(dim=1)
-                actions = actions.unsqueeze(1)
-                rewards = rewards.unsqueeze(1)
-                dones = dones.unsqueeze(1)
+        with torch.amp.autocast():
+            if self.iqn and self.munchausen:
+                with torch.no_grad():
+                    Q_targets_next, _ = self.tgt_net(next_states)
+                    q_t_n = Q_targets_next.mean(dim=1)
+                    actions = actions.unsqueeze(1)
+                    rewards = rewards.unsqueeze(1)
+                    dones = dones.unsqueeze(1)
+                    if self.per:
+                        weights = weights.unsqueeze(1)
+                    logsum = torch.logsumexp((q_t_n - q_t_n.max(1)[0].unsqueeze(-1)) / self.entropy_tau, 1).unsqueeze(-1)
+                    tau_log_pi_next = (q_t_n - q_t_n.max(1)[0].unsqueeze(-1) - self.entropy_tau * logsum).unsqueeze(1)
+                    pi_target = T.nn.functional.softmax(q_t_n / self.entropy_tau, dim=1).unsqueeze(1)
+                    Q_target = (self.gamma ** self.n * (pi_target * (Q_targets_next - tau_log_pi_next) * (~dones.unsqueeze(-1))).sum(2)).unsqueeze(1)
+                    q_k_target = self.net.qvals(states)
+                    v_k_target = q_k_target.max(1)[0].unsqueeze(-1)
+                    tau_log_pik = q_k_target - v_k_target - self.entropy_tau * torch.logsumexp((q_k_target - v_k_target) / self.entropy_tau, 1).unsqueeze(-1)
+                    munchausen_addon = tau_log_pik.gather(1, actions)
+                    munchausen_reward = (rewards + self.alpha * torch.clamp(munchausen_addon, min=self.lo, max=0)).unsqueeze(-1)
+                    Q_targets = munchausen_reward + Q_target
+                q_k, taus = self.net(states)
+                Q_expected = q_k.gather(2, actions.unsqueeze(-1).expand(self.batch_size, self.num_tau, 1))
+                td_error = Q_targets - Q_expected
+                loss_v = T.abs(td_error).sum(dim=1).mean(dim=1).data
+                huber_l = calculate_huber_loss(td_error, 1.0, self.num_tau)
+                quantil_l = T.abs(taus - (td_error.detach() < 0).float()) * huber_l / 1.0
+                loss = quantil_l.sum(dim=1).mean(dim=1, keepdim=True)
                 if self.per:
-                    weights = weights.unsqueeze(1)
-                logsum = torch.logsumexp((q_t_n - q_t_n.max(1)[0].unsqueeze(-1)) / self.entropy_tau, 1).unsqueeze(-1)
-                tau_log_pi_next = (q_t_n - q_t_n.max(1)[0].unsqueeze(-1) - self.entropy_tau * logsum).unsqueeze(1)
-                pi_target = T.nn.functional.softmax(q_t_n / self.entropy_tau, dim=1).unsqueeze(1)
-                Q_target = (self.gamma ** self.n * (pi_target * (Q_targets_next - tau_log_pi_next) * (~dones.unsqueeze(-1))).sum(2)).unsqueeze(1)
-                q_k_target = self.net.qvals(states)
-                v_k_target = q_k_target.max(1)[0].unsqueeze(-1)
-                tau_log_pik = q_k_target - v_k_target - self.entropy_tau * torch.logsumexp((q_k_target - v_k_target) / self.entropy_tau, 1).unsqueeze(-1)
-                munchausen_addon = tau_log_pik.gather(1, actions)
-                munchausen_reward = (rewards + self.alpha * torch.clamp(munchausen_addon, min=self.lo, max=0)).unsqueeze(-1)
-                Q_targets = munchausen_reward + Q_target
-            q_k, taus = self.net(states)
-            Q_expected = q_k.gather(2, actions.unsqueeze(-1).expand(self.batch_size, self.num_tau, 1))
-            td_error = Q_targets - Q_expected
-            loss_v = T.abs(td_error).sum(dim=1).mean(dim=1).data
-            huber_l = calculate_huber_loss(td_error, 1.0, self.num_tau)
-            quantil_l = T.abs(taus - (td_error.detach() < 0).float()) * huber_l / 1.0
-            loss = quantil_l.sum(dim=1).mean(dim=1, keepdim=True)
-            if self.per:
-                loss = loss * weights.to(self.net.device)
-            loss = loss.mean()
+                    loss = loss * weights.to(self.net.device)
+                loss = loss.mean()
 
         self.memory.update_priorities(idxs, loss_v.cpu().detach().numpy())
 
         if self.analytics:
             with torch.no_grad():
                 self.analytic_object.add_loss(loss.cpu().detach())
-        loss.backward()
+        self.scaler.scale(loss).backward()
 
         if self.analytics:
             with torch.no_grad():
@@ -305,7 +307,9 @@ class BTRAgent:
                     churn_actions_before = T.argmax(churn_qvals_before, dim=1).cpu()
 
         T.nn.utils.clip_grad_norm_(self.net.parameters(), self.grad_clip)
-        self.optimizer.step()
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        self.optimizer.zero_grad()
 
         if self.analytics and self.grad_steps % 1 == 0:
             with torch.no_grad():

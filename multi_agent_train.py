@@ -29,6 +29,44 @@ EPSILON_DISABLED_FRAMES = 100_000_000
 
 total_frames = 0
 
+import concurrent.futures
+
+class PersistentClient:
+    def __init__(self, address, authkey=b'secret', timeout=12.0, retries=10, delay=1.0):
+        self.address = address
+        self.authkey = authkey
+        self.timeout = timeout
+        self.retries = retries
+        self.delay = delay
+        self.conn = None
+        self.connect()
+    
+    def connect(self):
+        attempt = 0
+        while attempt < self.retries:
+            try:
+                self.conn = Client(self.address, authkey=self.authkey)
+                return  # Successful connection, exit the loop.
+            except ConnectionRefusedError as e:
+                attempt += 1
+                time.sleep(self.delay)
+        # If all attempts fail, raise the error.
+        raise ConnectionRefusedError(f"Could not connect to {self.address} after {self.retries} attempts")
+    
+    def send(self, data):
+        try:
+            self.conn.send(data)
+            return self.conn.recv()
+        except Exception as e:
+            # Reconnect and retry on error.
+            self.connect()
+            self.conn.send(data)
+            return self.conn.recv()
+    
+    def close(self):
+        if self.conn:
+            self.conn.close()
+
 def set_env_action(address, action, authkey=b'secret'):
     try:
         conn = Client(address, authkey=authkey)
@@ -56,12 +94,9 @@ def get_env_state(address, authkey=b'secret', timeout=12.0):
             time.sleep(1)
 
 def preprocess_frame_stack(frame_stack):
-    frames = []
-    for frame in frame_stack:
-        frame_tensor = torch.from_numpy(frame).unsqueeze(0).float().to('cuda')
-        frames.append(frame_tensor)
-    stacked = torch.cat(frames, dim=0)  # (4, 128, 128)
-    return stacked
+    frames = np.stack(frame_stack, axis=0)  # shape: (framestack, H, W)
+    tensor = torch.from_numpy(frames).float().to('cuda')
+    return tensor
 
 def launch_dolphin_for_worker(worker_id):
     port = 6000 + worker_id
@@ -112,14 +147,17 @@ class VecDolphinEnv:
         self.num_envs = num_envs
         self.frame_skip = frame_skip
         self.env_addresses = []
+        self.persistent_clients = []
         self.frame_buffers = []
         self.process_handles = []
         for i in range(num_envs):
             address, proc = launch_dolphin_for_worker(i)
             self.env_addresses.append(address)
             self.process_handles.append(proc)
-        for addr in self.env_addresses:
-            state = get_env_state(addr)
+            # Create a persistent client per environment.
+            self.persistent_clients.append(PersistentClient(address))
+        for i, addr in enumerate(self.env_addresses):
+            state = self.persistent_clients[i].send({"command": "get_state"})
             logging.info(f"Connected to environment at {addr} with timestep {state['timestep']}")
             fb = deque(maxlen=4)
             for _ in range(4):
@@ -147,20 +185,26 @@ class VecDolphinEnv:
         next_obs = [None] * self.num_envs
         total_rewards = [0.0] * self.num_envs
         terminals = [0] * self.num_envs
-        for i in range(self.num_envs):
-            set_env_action(self.env_addresses[i], actions[i])
-        for i in range(self.num_envs):
-            try:
-                state = get_env_state(self.env_addresses[i], timeout=12.0)
-            except TimeoutError as e:
-                logging.error(f"Worker {i} timeout: {e}")
-                self.restart_worker(i)
-                try:
-                    state = get_env_state(self.env_addresses[i], timeout=12.0)
-                except TimeoutError:
-                    state = {"frame": np.zeros((Ymem, Xmem), dtype=np.uint8), "reward": 0.0, "terminal": False}
+
+        # Set actions concurrently.
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            set_futures = [executor.submit(self.persistent_clients[i].send,
+                                             {"command": "set_action", "value": actions[i]})
+                           for i in range(self.num_envs)]
+            for future in concurrent.futures.as_completed(set_futures):
+                _ = future.result()
+
+        # Retrieve states concurrently.
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            get_futures = [executor.submit(self.persistent_clients[i].send,
+                                             {"command": "get_state"})
+                           for i in range(self.num_envs)]
+            results = [future.result() for future in get_futures]
+
+        for i, state in enumerate(results):
             self.frame_buffers[i].append(state["frame"])
             if state["terminal"]:
+                # Reset the frame buffer on terminal.
                 fb = deque(maxlen=4)
                 for _ in range(4):
                     fb.append(state["frame"])
@@ -169,6 +213,7 @@ class VecDolphinEnv:
             next_obs[i] = obs_tensor
             total_rewards[i] = state["reward"]
             terminals[i] = state["terminal"]
+        
         total_frames += (4 * self.num_envs)
         if total_frames % 1000 == 0:
             logging.info(f"Frames = {total_frames}")
@@ -245,7 +290,8 @@ def main():
             num_envs=num_envs,
             agent_name='BTRAgent',
             total_frames=0,
-            testing=False
+            testing=True,
+            rr=0.015625
         )
         load_checkpoint(agent)
         loss_logs = []
