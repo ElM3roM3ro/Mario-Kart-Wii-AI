@@ -291,13 +291,12 @@ def main():
             agent_name='BTRAgent',
             total_frames=0,
             testing=True,
-            rr=0.015625
+            rr= 1 / 64
         )
         load_checkpoint(agent)
         loss_logs = []
         episode_rewards = []
         while True:
-            current_states = [np.array(LazyFrames(list(env.frame_buffers[i]))) for i in range(num_envs)]
             obs_list = []
             for i in range(num_envs):
                 obs_tensor = preprocess_frame_stack(list(env.frame_buffers[i]))
@@ -308,7 +307,7 @@ def main():
             next_obs, rewards, terminals = env.step(actions.numpy())
             # Store transitions and perform learning for each environment
             for i in range(num_envs):
-                agent.store_transition(current_states[i], actions[i].item(), rewards[i], next_obs[i], terminals[i], i)
+                agent.store_transition(batch_obs[i], actions[i].item(), rewards[i], next_obs[i], terminals[i], i)
                 buffer_size += 1
             if buffer_size % 1000 == 0:
                 logging.info(f"Buffer size = {buffer_size}")
@@ -319,7 +318,8 @@ def main():
                 logging.info(f"Step {total_steps}: Total Frames {env.frame_skip * total_steps}, "
                             f"Env Steps {agent.env_steps}, Grad Steps {agent.grad_steps}, "
                             f"Epsilon {agent.epsilon.eps:.4f}, Avg Reward {avg_reward:.4f}")
-                save_checkpoint(agent, total_steps)
+                if buffer_size >= 200000:
+                    save_checkpoint(agent, total_steps)
     except KeyboardInterrupt:
         logging.info("Training interrupted by user. Exiting...")
         try:
