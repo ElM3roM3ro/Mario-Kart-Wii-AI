@@ -170,7 +170,7 @@ class BTRAgent:
         self.eval_mode = False
         if self.loading_checkpoint:
             self.load_models("insert_model_name")
-        self.scaler = torch.amp.GradScaler()
+        self.scaler = torch.amp.GradScaler(device=device)
     
     def get_grad_steps(self):
         return self.grad_steps
@@ -206,9 +206,9 @@ class BTRAgent:
             return x
 
     def store_transition(self, state, action, reward, next_state, done, stream, prio=True):
-        # If state is a LazyFrames object, convert it to a NumPy array
-        if hasattr(state, '__array__'):
-            state = np.array(state)
+        # If state is a GPU tensor, convert it to a NumPy array on the CPU
+        if isinstance(state, torch.Tensor):
+            state = state.cpu().numpy()
         # If next_state is a GPU tensor, convert it to a NumPy array on the CPU
         if isinstance(next_state, torch.Tensor):
             next_state = next_state.cpu().numpy()
@@ -251,7 +251,7 @@ class BTRAgent:
         idxs, states, actions, rewards, next_states, dones, weights = self.memory.sample(self.batch_size)
         self.optimizer.zero_grad()
 
-        with torch.amp.autocast():
+        with torch.amp.autocast(device_type=self.device):
             if self.iqn and self.munchausen:
                 with torch.no_grad():
                     Q_targets_next, _ = self.tgt_net(next_states)
