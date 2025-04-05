@@ -2,7 +2,7 @@ import time
 import collections
 import sys
 # Set up site–packages path.
-user = "Zach"
+user = "Nolan"
 if user == "Nolan":
     sys.path.append(r"C:\Users\nolan\AppData\Local\Programs\Python\Python312\Lib\site-packages")
 elif user == "Zach":
@@ -128,9 +128,12 @@ def compute_reward():
     if speed < 45:
         reward -= 10.0
         terminal = True
+        print("env_multi.py: Speed too low, terminating.")
     if lap_progress >= 4.0:
         reward += 10.0
         terminal = True
+        print("env_multi.py: Lap complete, terminating.")
+    print(f"env_multi.py: Speed: {speed}, Lap Progress: {lap_progress}, Reward: {reward}, Terminal: {terminal}")
     return reward, terminal, speed, lap_progress
 
 def read_game_state():
@@ -253,6 +256,7 @@ while True:
     frame_skip_counter = 0
 
     if terminal:
+        time.sleep(0.01)
         reset_environment(initial=False)
         continue
 
