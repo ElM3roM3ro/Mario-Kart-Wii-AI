@@ -7,7 +7,7 @@ import logging
 import matplotlib.pyplot as plt
 import concurrent.futures
 from collections import deque
-from agent import BTRAgent  # Now using the new agent implementation
+from agent import BTRAgent  # Using the new agent implementation
 from multiprocessing.connection import Client
 import collections
 
@@ -71,7 +71,7 @@ def launch_dolphin_for_worker(worker_id):
     paths = {
         "dolphin_path": r"F:\DolphinEmuFork_src\dolphin\Binary\x64\Dolphin.exe",
         "script_path": r"F:\MKWii_Capstone_Project\UPDATED_MKWii_Capstone\Mario-Kart-Wii-AI\env_multi.py",
-        "savestate_path": r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino.sav",
+        "savestate_path": r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino_savestate.sav",
         "game_path": r"E:\Games\Dolphin Games\MarioKart(Compress).iso",
     }
     if user == "Nolan":
@@ -118,7 +118,6 @@ class VecDolphinEnv:
             self.persistent_clients.append(client)
         # Perform handshake: get initial observation from each env.
         for i, client in enumerate(self.persistent_clients):
-            # Expect a "reset" message with the initial observation.
             reset_msg = client.conn.recv()
             if isinstance(reset_msg, dict) and reset_msg.get("command") == "reset":
                 self.current_obs.append(reset_msg["observation"])
@@ -144,39 +143,20 @@ class VecDolphinEnv:
         else:
             self.current_obs[i] = None
 
-    # Note: We now pass in the previous observation batch (batch_obs) so we can use its last frame if terminal.
-    def step(self, actions, prev_obs):
+    # Updated step function: directly uses the transition returned by env_multi.py.
+    def step(self, actions):
         transitions = [None] * self.num_envs
-        reset_obs_list = [None] * self.num_envs  # to hold the new reset obs from env_multi (if terminal)
-        # Send step commands concurrently.
         with concurrent.futures.ThreadPoolExecutor() as executor:
             futures = [executor.submit(self.persistent_clients[i].send,
                                          {"command": "step", "action": actions[i]})
                        for i in range(self.num_envs)]
             for i, future in enumerate(futures):
-                trans = future.result()
-                if trans["terminal"]:
-                    reset_obs_list[i] = trans["next_observation"]  # the reset obs from env_multi
-                transitions[i] = trans
+                transitions[i] = future.result()
         next_obs = []
         rewards = []
         terminals = []
-        # Save the original batch observations for use in terminal transitions.
-        old_obs = prev_obs  # list of tensors, each shape [4, H, W]
-        # For each environment, if a terminal is triggered then
-        # override the transition's next_obs to be the terminal frame (from old_obs) repeated 4 times.
         for i, trans in enumerate(transitions):
-            if trans["terminal"]:
-                # Extract the terminal frame from the previous observation.
-                # We assume the terminal frame is the last frame in the observation stack.
-                terminal_frame = old_obs[i][-1].cpu().numpy()  # shape (H, W)
-                fixed_next_obs = np.stack([terminal_frame] * 4, axis=0)
-                trans["next_observation"] = fixed_next_obs
-                # Update current_obs with the reset observation provided by the environment.
-                self.current_obs[i] = reset_obs_list[i]
-            else:
-                self.current_obs[i] = trans["next_observation"]
-            # Convert next_observation to torch tensor for use by the agent.
+            self.current_obs[i] = trans["next_observation"]
             obs_tensor = torch.from_numpy(np.array(trans["next_observation"])).float().to('cuda')
             next_obs.append(obs_tensor)
             rewards.append(trans["reward"])
@@ -192,7 +172,6 @@ class VecDolphinEnv:
             except Exception as e:
                 logging.error(f"Error terminating Dolphin process: {e}")
 
-# --- Checkpoint and Plotting Functions ---
 checkpoint_path = "vectorized_checkpoint.pt"
 
 def save_checkpoint(agent, update_count):
@@ -241,38 +220,36 @@ def plot_metrics(loss_logs, episode_rewards):
     else:
         logging.info("No episode rewards to plot.")
 
-# --- Main Training Loop ---
 def main():
     total_steps = 0
-    num_envs = 8
-    buffer_size = 0
+    num_envs = 1
     try:
         env = VecDolphinEnv(num_envs, frame_skip=4)
         agent = BTRAgent(
             n_actions=8,
-            input_dims=(4, 128, 128),
+            input_dims=(4, 128, 128),  # Ensure these match the target resolution in env_multi.py.
             device='cuda',
             num_envs=num_envs,
             agent_name='BTRAgent',
             total_frames=0,
-            testing=False
+            testing=True
         )
         load_checkpoint(agent)
         loss_logs = []
         episode_rewards = []
         while True:
-            # Build a batch from current observations.
             batch_obs = []
             for i in range(num_envs):
                 obs_tensor = torch.from_numpy(np.array(env.current_obs[i])).float().to('cuda')
                 batch_obs.append(obs_tensor.unsqueeze(0))
-            batch_obs = torch.cat(batch_obs, dim=0)  # shape: [num_envs, 4, H, W]
-            # Let the agent choose actions.
+            batch_obs = torch.cat(batch_obs, dim=0)
             actions = agent.choose_action(batch_obs)
-            # Send actions to environments; each env returns a full transition.
-            next_obs, rewards, terminals = env.step(actions.numpy(), batch_obs)
+            next_obs, rewards, terminals = env.step(actions.numpy())
             
-            # # --- Debug Saving: Save Frames After Transition ---
+            for i in range(num_envs):
+                agent.store_transition(batch_obs[i].clone(), actions[i].item(), rewards[i], next_obs[i].clone(), terminals[i], i)
+            # #--- Debug Saving: Save Frames After Transition (optional) ---
+            # #(This section remains commented; uncomment for debugging purposes.)
             # debug_dir = "debug_data_after_store"
             # os.makedirs(debug_dir, exist_ok=True)
             # step_folder = os.path.join(debug_dir, f"step_{total_steps}")
@@ -280,7 +257,6 @@ def main():
             # for worker in range(num_envs):
             #     worker_folder = os.path.join(step_folder, f"worker_{worker}")
             #     os.makedirs(worker_folder, exist_ok=True)
-            #     # Use the batch observations as the previous observation.
             #     obs_stack = batch_obs[worker].cpu().squeeze(0)
             #     next_stack = next_obs[worker].cpu()
             #     for frame_idx in range(obs_stack.shape[0]):
@@ -288,18 +264,17 @@ def main():
             #         plt.imsave(obs_filename, obs_stack[frame_idx].numpy(), cmap='gray')
             #         next_filename = os.path.join(worker_folder, f"worker_{worker}_next_frame_{frame_idx}_step_{total_steps}.png")
             #         plt.imsave(next_filename, next_stack[frame_idx].numpy(), cmap='gray')
-            # # --- End Debug Saving ---
-
-            for i in range(num_envs):
-                agent.store_transition(batch_obs[i], actions[i].item(), rewards[i], next_obs[i], terminals[i], i)
+            # #--- End Debug Saving ---
+            
             if agent.memory.capacity % 1000 == 0:
-                logging.info(f"Buffer size = {buffer_size}")
+                logging.info(f"Buffer size = {agent.memory.capacity}")
             agent.learn()
             total_steps += num_envs
             if total_steps % 1000 == 0:
                 avg_reward = np.mean(rewards)
                 logging.info(f"Step {total_steps}: Avg Reward {avg_reward:.4f}")
-                if buffer_size >= 200000:
+                # Save checkpoint after sufficient experiences.
+                if agent.memory.capacity >= 200000:
                     save_checkpoint(agent, total_steps)
     except KeyboardInterrupt:
         logging.info("Training interrupted by user. Exiting...")
