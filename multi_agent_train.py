@@ -232,7 +232,8 @@ def main():
             num_envs=num_envs,
             agent_name='BTRAgent',
             total_frames=0,
-            testing=True
+            testing=True,
+            rr=1/64
         )
         load_checkpoint(agent)
         loss_logs = []

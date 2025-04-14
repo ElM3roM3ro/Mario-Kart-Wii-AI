@@ -221,12 +221,13 @@ while True:
 
     if isinstance(command, dict) and command.get("command") == "step":
         action = command.get("action", 0)
-        apply_action(action)
+        #apply_action(action)
         reward = 0
         terminal = False
 
         # Frameskip loop: process multiple frames and accumulate rewards.
         for i in range(frame_skip):
+            apply_action(action)
             if i == frame_skip - 1:
                 # On the last frame, draw a new frame.
                 frame_data = await event.framedrawn()
@@ -247,9 +248,11 @@ while True:
             if terminal:
                 # Terminal branch: advance extra frames and reset environment.
                 for j in range(2):
+                    apply_action(action)
                     await event.frameadvance()
                 reset_environment(initial=False)
                 for j in range(1):
+                    apply_action(action)
                     await event.frameadvance()
                 frame_data = await event.framedrawn()
                 try:

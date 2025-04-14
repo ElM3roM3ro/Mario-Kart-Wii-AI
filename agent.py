@@ -60,6 +60,15 @@ def create_network(impala, iqn, input_dims, n_actions, spectral_norm, device, no
         return NatureIQN(input_dims[0], n_actions, device=device, noisy=noisy, num_tau=num_tau, linear_size=linear_size,
                          non_factorised=non_factorised, dueling=dueling)
 
+# Helper function to convert an object to a NumPy array only if necessary.
+def to_numpy(x):
+    if isinstance(x, np.ndarray):
+        return x
+    elif hasattr(x, 'cpu'):
+        return x.detach().cpu().numpy()
+    else:
+        return np.array(x)
+
 class BTRAgent:
     def __init__(self, n_actions, input_dims, device, num_envs, agent_name, total_frames, testing=False, batch_size=256,
                  rr=1, maxpool_size=6, lr=1e-4, target_replace=500,
@@ -205,13 +214,11 @@ class BTRAgent:
                 x = randomise_action_batch(x, probs, self.n_actions)
             return x
 
+    # Updated store_transition that minimizes unnecessary conversions.
     def store_transition(self, state, action, reward, next_state, done, stream, prio=True):
-        # If state is a GPU tensor, convert it to a NumPy array on the CPU
-        if isinstance(state, torch.Tensor):
-            state = state.cpu().numpy()
-        # If next_state is a GPU tensor, convert it to a NumPy array on the CPU
-        if isinstance(next_state, torch.Tensor):
-            next_state = next_state.cpu().numpy()
+        # Convert state and next_state to numpy arrays only if needed.
+        state = to_numpy(state)
+        next_state = to_numpy(next_state)
         self.memory.append(state, action, reward, next_state, done, stream, prio=prio)
         self.epsilon.update_eps()
         self.env_steps += 1
