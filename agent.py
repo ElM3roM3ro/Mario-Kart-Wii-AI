@@ -6,8 +6,18 @@ import torch.nn as nn
 import torch.optim as optim
 from copy import deepcopy
 from functools import partial
-from networks import ImpalaCNNLargeIQN, NatureIQN, FactorizedNoisyLinear
+from networks import ImpalaCNNLargeIQN, FactorizedNoisyLinear
 from PER_btr import PER
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s: %(message)s',
+    handlers=[
+        logging.FileHandler("agent_out.log", mode='w'),
+        logging.StreamHandler()
+    ]
+)
 
 class EpsilonGreedy:
     def __init__(self, eps_start, eps_steps, eps_final, action_space):
@@ -57,8 +67,16 @@ def create_network(impala, iqn, input_dims, n_actions, spectral_norm, device, no
         #                           noisy=noisy, maxpool=maxpool, model_size=model_size, maxpool_size=maxpool_size,
         #                           linear_size=linear_size)
     else:
-        return NatureIQN(input_dims[0], n_actions, device=device, noisy=noisy, num_tau=num_tau, linear_size=linear_size,
-                         non_factorised=non_factorised, dueling=dueling)
+        print("ERROR: Model doesn't exist")
+
+# Helper function to convert an object to a NumPy array only if necessary.
+def to_numpy(x):
+    if isinstance(x, np.ndarray):
+        return x
+    elif hasattr(x, 'cpu'):
+        return x.detach().cpu().numpy()
+    else:
+        return np.array(x)
 
 class BTRAgent:
     def __init__(self, n_actions, input_dims, device, num_envs, agent_name, total_frames, testing=False, batch_size=256,
@@ -169,7 +187,7 @@ class BTRAgent:
         self.replay_ratio_cnt = 0
         self.eval_mode = False
         if self.loading_checkpoint:
-            self.load_models("insert_model_name")
+            self.load_models(self.agent_name)
         self.scaler = torch.amp.GradScaler(device=device)
     
     def get_grad_steps(self):
@@ -193,25 +211,40 @@ class BTRAgent:
             if isinstance(m, networks.FactorizedNoisyLinear):
                 m.disable_noise()
 
-    def choose_action(self, observation):
+    def choose_action(self, observation, debug=False):
         with T.no_grad():
+            # For noisy networks make sure to reset noise if in training mode.
             if self.noisy and not self.eval_mode:
                 self.reset_noise(self.net)
+                
+            # Convert observation into a tensor and compute Q-values.
             state = T.tensor(observation, dtype=T.float).to(self.device)
             qvals = self.net.qvals(state, advantages_only=True)
+
+            # --- Debug Code Start ---
+            if debug:
+                # Log the entire Q-values tensor.
+                logging.info("DEBUG: Q-values from network: %s", qvals.cpu().numpy())
+                # Compute the best (argmax) action from the Q-values.
+                best_action = T.argmax(qvals, dim=1)
+                logging.info("DEBUG: Action chosen based on max Q: %s", best_action.cpu().numpy())
+            # --- Debug Code End ---
+            
+            # Choose action using the greedy action from the network output.
             x = T.argmax(qvals, dim=1).cpu()
+            
+            # If in early training (or other conditions), add some randomness.
             if self.env_steps < self.min_sampling_size or not self.noisy or (self.env_steps < self.total_frames / 2 and self.eps_disable):
                 probs = self.epsilon.eps
                 x = randomise_action_batch(x, probs, self.n_actions)
             return x
 
+    # Updated store_transition that avoids unnecessary conversions.
     def store_transition(self, state, action, reward, next_state, done, stream, prio=True):
-        # If state is a GPU tensor, convert it to a NumPy array on the CPU
-        if isinstance(state, torch.Tensor):
-            state = state.cpu().numpy()
-        # If next_state is a GPU tensor, convert it to a NumPy array on the CPU
-        if isinstance(next_state, torch.Tensor):
-            next_state = next_state.cpu().numpy()
+        if not isinstance(state, np.ndarray):
+            state = to_numpy(state)
+        if not isinstance(next_state, np.ndarray):
+            next_state = to_numpy(next_state)
         self.memory.append(state, action, reward, next_state, done, stream, prio=prio)
         self.epsilon.update_eps()
         self.env_steps += 1
@@ -220,11 +253,15 @@ class BTRAgent:
         self.tgt_net.load_state_dict(self.net.state_dict())
 
     def save_model(self):
-        self.net.save_checkpoint(self.agent_name + "_" + str(int((self.env_steps // 250000))) + "M")
+        print("Saving Models")
+        self.net.save_checkpoint(self.agent_name)
+        print("Models Saved")
 
     def load_models(self, name):
+        print("Loading Models")
         self.net.load_checkpoint(name)
         self.tgt_net.load_checkpoint(name)
+        print("Models Loaded")
 
     def learn(self):
         if self.replay_ratio < 1:
@@ -246,13 +283,25 @@ class BTRAgent:
             self.reset_noise(self.tgt_net)
 
         if self.grad_steps % self.replace_target_cnt == 0:
+            print("Updating Target Network")
             self.replace_target_network()
 
         idxs, states, actions, rewards, next_states, dones, weights = self.memory.sample(self.batch_size)
+        # # --- Debug Code Start ---
+        # with T.no_grad():
+        #     # Compute Q-values for the states in the current training batch.
+        #     batch_qvals = self.net.qvals(states, advantages_only=True)
+        #     # Compute best actions from these Q-values.
+        #     batch_best_actions = T.argmax(batch_qvals, dim=1)
+        #     logging.info("DEBUG: Training Batch Q-values:\n%s", batch_qvals.cpu().numpy())
+        #     logging.info("DEBUG: Training Batch - Chosen actions (by max Q):\n%s", batch_best_actions.cpu().numpy())
+        # # --- Debug Code End ---
+
         self.optimizer.zero_grad()
 
         with torch.amp.autocast(device_type=self.device):
             if self.iqn and self.munchausen:
+                # [The rest of your learn_call code for munchausen IQN training]
                 with torch.no_grad():
                     Q_targets_next, _ = self.tgt_net(next_states)
                     q_t_n = Q_targets_next.mean(dim=1)

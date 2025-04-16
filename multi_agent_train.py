@@ -7,7 +7,7 @@ import logging
 import matplotlib.pyplot as plt
 import concurrent.futures
 from collections import deque
-from agent import BTRAgent  # Now using the new agent implementation
+from agent import BTRAgent, choose_eval_action  # Using the new agent implementation
 from multiprocessing.connection import Client
 import collections
 
@@ -71,7 +71,7 @@ def launch_dolphin_for_worker(worker_id):
     paths = {
         "dolphin_path": r"F:\DolphinEmuFork_src\dolphin\Binary\x64\Dolphin.exe",
         "script_path": r"F:\MKWii_Capstone_Project\UPDATED_MKWii_Capstone\Mario-Kart-Wii-AI\env_multi.py",
-        "savestate_path": r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino.sav",
+        "savestate_path": r"F:\MKWii_Capstone_Project\Mario-Kart-Wii-AI\funky_flame_delfino_savestate.sav",
         "game_path": r"E:\Games\Dolphin Games\MarioKart(Compress).iso",
     }
     if user == "Nolan":
@@ -116,9 +116,7 @@ class VecDolphinEnv:
             self.process_handles.append(proc)
             client = PersistentClient(address)
             self.persistent_clients.append(client)
-        # Perform handshake: get initial observation from each env.
         for i, client in enumerate(self.persistent_clients):
-            # Expect a "reset" message with the initial observation.
             reset_msg = client.conn.recv()
             if isinstance(reset_msg, dict) and reset_msg.get("command") == "reset":
                 self.current_obs.append(reset_msg["observation"])
@@ -144,40 +142,21 @@ class VecDolphinEnv:
         else:
             self.current_obs[i] = None
 
-    # Note: We now pass in the previous observation batch (batch_obs) so we can use its last frame if terminal.
-    def step(self, actions, prev_obs):
+    # Updated step function: converts using the existing NumPy array without extra wrapping.
+    def step(self, actions):
         transitions = [None] * self.num_envs
-        reset_obs_list = [None] * self.num_envs  # to hold the new reset obs from env_multi (if terminal)
-        # Send step commands concurrently.
         with concurrent.futures.ThreadPoolExecutor() as executor:
             futures = [executor.submit(self.persistent_clients[i].send,
                                          {"command": "step", "action": actions[i]})
                        for i in range(self.num_envs)]
             for i, future in enumerate(futures):
-                trans = future.result()
-                if trans["terminal"]:
-                    reset_obs_list[i] = trans["next_observation"]  # the reset obs from env_multi
-                transitions[i] = trans
+                transitions[i] = future.result()
         next_obs = []
         rewards = []
         terminals = []
-        # Save the original batch observations for use in terminal transitions.
-        old_obs = prev_obs  # list of tensors, each shape [4, H, W]
-        # For each environment, if a terminal is triggered then
-        # override the transition's next_obs to be the terminal frame (from old_obs) repeated 4 times.
         for i, trans in enumerate(transitions):
-            if trans["terminal"]:
-                # Extract the terminal frame from the previous observation.
-                # We assume the terminal frame is the last frame in the observation stack.
-                terminal_frame = old_obs[i][-1].cpu().numpy()  # shape (H, W)
-                fixed_next_obs = np.stack([terminal_frame] * 4, axis=0)
-                trans["next_observation"] = fixed_next_obs
-                # Update current_obs with the reset observation provided by the environment.
-                self.current_obs[i] = reset_obs_list[i]
-            else:
-                self.current_obs[i] = trans["next_observation"]
-            # Convert next_observation to torch tensor for use by the agent.
-            obs_tensor = torch.from_numpy(np.array(trans["next_observation"])).float().to('cuda')
+            self.current_obs[i] = trans["next_observation"]
+            obs_tensor = torch.from_numpy(trans["next_observation"]).float().to('cuda')
             next_obs.append(obs_tensor)
             rewards.append(trans["reward"])
             terminals.append(trans["terminal"])
@@ -192,7 +171,6 @@ class VecDolphinEnv:
             except Exception as e:
                 logging.error(f"Error terminating Dolphin process: {e}")
 
-# --- Checkpoint and Plotting Functions ---
 checkpoint_path = "vectorized_checkpoint.pt"
 
 def save_checkpoint(agent, update_count):
@@ -241,66 +219,147 @@ def plot_metrics(loss_logs, episode_rewards):
     else:
         logging.info("No episode rewards to plot.")
 
-# --- Main Training Loop ---
+# -------------------------------
+# NEW: Evaluation Function
+# -------------------------------
+def evaluate_agent(agent, eval_client, num_episodes=100, frameskip=4):
+    """
+    Evaluates the current agent by running 'num_episodes' evaluation episodes.
+    Evaluation epsilon is set to 0.01 until total environment frames reach 125M, then 0.
+    """
+    # Prepare evaluation network and disable noise.
+    agent.prep_evaluation()  # This creates agent.eval_net and disables noise.
+    
+    # Compute evaluation epsilon based on total environment frames.
+    env_frames = agent.env_steps * frameskip
+    eval_epsilon = 0.01 if env_frames < 125e6 else 0.0
+    logging.info(f"Evaluation Phase: env_frames={env_frames}, using eval_epsilon={eval_epsilon}")
+    
+    episode_rewards = []
+    for ep in range(num_episodes):
+        # Reset the evaluation environment.
+        eval_client.send({"command": "reset"})
+        response = eval_client.conn.recv()
+        obs = response["observation"]
+        done = False
+        ep_reward = 0.0
+        
+        while not done:
+            # Use the evaluation network with fixed epsilon.
+            action_tensor = choose_eval_action(
+                observation=obs,
+                eval_net=agent.eval_net,
+                n_actions=agent.n_actions,
+                device=agent.device,
+                rng=eval_epsilon
+            )
+            action = int(action_tensor.item() if isinstance(action_tensor, torch.Tensor) else action_tensor)
+            eval_client.send({"command": "step", "action": action})
+            step_response = eval_client.conn.recv()
+            obs = step_response["next_observation"]
+            reward = step_response["reward"]
+            done = step_response["terminal"]
+            ep_reward += reward
+        episode_rewards.append(ep_reward)
+        logging.info(f"Eval Episode {ep+1}/{num_episodes}: Total Reward = {ep_reward}")
+    avg_reward = np.mean(episode_rewards)
+    logging.info(f"Evaluation complete: Average Reward over {num_episodes} episodes = {avg_reward}")
+    return avg_reward
+
 def main():
     total_steps = 0
-    num_envs = 8
-    buffer_size = 0
+    num_envs = 4
+    debug_mode = False
+    print_frames = False
     try:
         env = VecDolphinEnv(num_envs, frame_skip=4)
         agent = BTRAgent(
-            n_actions=8,
-            input_dims=(4, 128, 128),
+            n_actions=7,
+            input_dims=(4, 128, 128),  # Ensure these match the target resolution in env_multi.py.
             device='cuda',
             num_envs=num_envs,
             agent_name='BTRAgent',
-            total_frames=0,
-            testing=False
+            total_frames=200000000,
+            testing=True,
+            replay_period=64,
         )
-        load_checkpoint(agent)
+
+        agent.loading_checkpoint = False
+        if agent.loading_checkpoint:
+            agent.load_models(agent.agent_name + ".model")
         loss_logs = []
         episode_rewards = []
-        while True:
-            # Build a batch from current observations.
-            batch_obs = []
-            for i in range(num_envs):
-                obs_tensor = torch.from_numpy(np.array(env.current_obs[i])).float().to('cuda')
-                batch_obs.append(obs_tensor.unsqueeze(0))
-            batch_obs = torch.cat(batch_obs, dim=0)  # shape: [num_envs, 4, H, W]
-            # Let the agent choose actions.
-            actions = agent.choose_action(batch_obs)
-            # Send actions to environments; each env returns a full transition.
-            next_obs, rewards, terminals = env.step(actions.numpy(), batch_obs)
-            
-            # # --- Debug Saving: Save Frames After Transition ---
-            # debug_dir = "debug_data_after_store"
-            # os.makedirs(debug_dir, exist_ok=True)
-            # step_folder = os.path.join(debug_dir, f"step_{total_steps}")
-            # os.makedirs(step_folder, exist_ok=True)
-            # for worker in range(num_envs):
-            #     worker_folder = os.path.join(step_folder, f"worker_{worker}")
-            #     os.makedirs(worker_folder, exist_ok=True)
-            #     # Use the batch observations as the previous observation.
-            #     obs_stack = batch_obs[worker].cpu().squeeze(0)
-            #     next_stack = next_obs[worker].cpu()
-            #     for frame_idx in range(obs_stack.shape[0]):
-            #         obs_filename = os.path.join(worker_folder, f"worker_{worker}_obs_frame_{frame_idx}_step_{total_steps}.png")
-            #         plt.imsave(obs_filename, obs_stack[frame_idx].numpy(), cmap='gray')
-            #         next_filename = os.path.join(worker_folder, f"worker_{worker}_next_frame_{frame_idx}_step_{total_steps}.png")
-            #         plt.imsave(next_filename, next_stack[frame_idx].numpy(), cmap='gray')
-            # # --- End Debug Saving ---
 
-            for i in range(num_envs):
-                agent.store_transition(batch_obs[i], actions[i].item(), rewards[i], next_obs[i], terminals[i], i)
-            if agent.memory.capacity % 1000 == 0:
-                logging.info(f"Buffer size = {buffer_size}")
-            agent.learn()
+        # NEW: Set next evaluation threshold in environment steps.
+        next_eval_steps = 450000  # Every 250K env steps = 1M frames (if frameskip=4)
+        
+        # For evaluation, select a dedicated persistent client.
+        # Here we choose the first client (agent 0) to perform evaluation.
+        eval_client = env.persistent_clients[0]
+
+        while True:
             total_steps += num_envs
-            if total_steps % 1000 == 0:
-                avg_reward = np.mean(rewards)
-                logging.info(f"Step {total_steps}: Avg Reward {avg_reward:.4f}")
-                if buffer_size >= 200000:
-                    save_checkpoint(agent, total_steps)
+            batch_obs = []
+            batch_obs_np = []
+            for i in range(num_envs):
+                # Preserve the original numpy observation
+                batch_obs_np.append(env.current_obs[i])
+                obs_tensor = torch.from_numpy(env.current_obs[i]).float().to('cuda')
+                batch_obs.append(obs_tensor.unsqueeze(0))
+            batch_obs = torch.cat(batch_obs, dim=0)
+            if total_steps >= 4000:
+                actions = agent.choose_action(batch_obs, debug=debug_mode)
+            else:
+                actions = agent.choose_action(batch_obs)
+            next_obs, rewards, terminals = env.step(actions.numpy())
+            for i in range(num_envs):
+                # Store transitions using the original numpy observations.
+                agent.store_transition(batch_obs_np[i], actions[i].item(), rewards[i], env.current_obs[i], terminals[i], i)
+            
+            #--- Debug Saving ---
+            if print_frames:
+                debug_dir = "debug_data_after_store"
+                os.makedirs(debug_dir, exist_ok=True)
+                step_folder = os.path.join(debug_dir, f"step_{total_steps}")
+                os.makedirs(step_folder, exist_ok=True)
+                for worker in range(num_envs):
+                    worker_folder = os.path.join(step_folder, f"worker_{worker}")
+                    os.makedirs(worker_folder, exist_ok=True)
+                    obs_stack = batch_obs[worker].clone().cpu().squeeze(0)
+                    next_stack = next_obs[worker].clone().cpu()
+                    for frame_idx in range(obs_stack.shape[0]):
+                        obs_filename = os.path.join(worker_folder, f"worker_{worker}_obs_frame_{frame_idx}_step_{total_steps}.png")
+                        plt.imsave(obs_filename, obs_stack[frame_idx].numpy(), cmap='gray')
+                        next_filename = os.path.join(worker_folder, f"worker_{worker}_next_frame_{frame_idx}_step_{total_steps}.png")
+                        plt.imsave(next_filename, next_stack[frame_idx].numpy(), cmap='gray')
+                #--- End Debug Saving ---
+            
+            if agent.memory.capacity % 1000 == 0:
+                if agent.memory.capacity < 200000:
+                    logging.info(f"Burn-in: {(agent.memory.capacity / 200000) * 100}%")
+                else:
+                    logging.info(f"Buffer size = {agent.memory.capacity}")
+            if agent.env_steps % 64 == 0:
+                agent.learn()
+
+            # NEW: Trigger evaluation every 250K environment steps.
+            # if agent.env_steps >= next_eval_steps:
+            #     logging.info(f"Triggering evaluation at env_steps = {agent.env_steps} "
+            #                 f"({agent.env_steps * env.frame_skip} total frames)")
+            #     avg_eval_reward = evaluate_agent(agent, eval_client, num_episodes=100, frameskip=env.frame_skip)
+            #     logging.info(f"Evaluation Result at {agent.env_steps * env.frame_skip} frames: Average Reward = {avg_eval_reward}")
+            #     next_eval_steps += 250000  # Update next evaluation threshold.
+
+            if total_steps % (num_envs * 100000) == 0:
+                # avg_reward = np.mean(rewards)
+                # min_reward = np.min(rewards)
+                # max_reward = np.max(rewards)
+                # logging.info(f"Step {total_steps}: Avg Reward {avg_reward}, Min Reward {min_reward}, Max Reward {max_reward}")
+                # Save checkpoint after sufficient experiences.
+                if agent.memory.capacity >= 200000 and not agent.loading_checkpoint:
+                    agent.save_model()
+                elif agent.memory.capacity >= 300000 and agent.loading_checkpoint:
+                    agent.save_model()
     except KeyboardInterrupt:
         logging.info("Training interrupted by user. Exiting...")
         try:
