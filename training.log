@@ -1,0 +1,11 @@
+2025-04-16 16:15:19,811 INFO: Vectorized Env 0: Launched Dolphin with command: "C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\dolphin-x64-framedrawn-stable\Dolphin.exe" -u "C:\Users\nolan\DolphinUserDirs\instance_0" --no-python-subinterpreters --script "C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\env_multi.py" --save_state="C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_delfino.sav" --exec="C:\Users\nolan\source\repos\dolphin\Source\Core\DolphinQt\MarioKart(Compress).iso"
+2025-04-16 16:15:23,749 INFO: Connected to environment at ('localhost', 6000) with initial observation.
+2025-04-16 16:16:08,886 INFO: Buffer size = 1000
+2025-04-16 16:16:08,887 INFO: Step 1000: Avg Reward -10.0000
+2025-04-16 16:16:09,130 INFO: Buffer size = 1000
+2025-04-16 16:16:09,194 INFO: Buffer size = 1000
+2025-04-16 16:16:57,477 INFO: Step 2000: Avg Reward 0.0000
+2025-04-16 16:16:57,546 INFO: Buffer size = 2000
+2025-04-16 16:17:37,383 INFO: Step 3000: Avg Reward 0.1000
+2025-04-16 16:17:37,440 INFO: Buffer size = 3000
+2025-04-16 16:18:20,732 INFO: Step 4000: Avg Reward 0.0000
