@@ -48,6 +48,9 @@ frame_num = 0              # Frame counter.
 # New flag indicating that the next frame should be treated as a new episode.
 new_episode = True
 
+# Drift tracking using memory address
+prev_drift_value = 0       # Previous value at the drift memory address
+
 def reset_frame_stack(processed_frame):
     """
     Clears the current frame stack and fills it with copies of the provided processed_frame.
@@ -93,11 +96,16 @@ def read_game_state():
         lap_progress = memory.read_f32(0x80e48d3c)
         current_lap = int(memory.read_f32(0x80e96428))
         max_lap = int(memory.read_f32(0x80e96428))
+        # Read the drift value from memory
+        drift_value = memory.read_u16(0x80e51d86)
+        death_value = memory.read_u8(0x80facb39)
         return {
             'speed': speed,
             'lap_progress': lap_progress,
             'current_lap': current_lap,
-            'max_lap': max_lap
+            'max_lap': max_lap,
+            'drift_value': drift_value,
+            'death_value': death_value
         }
     except Exception as e:
         print("env_multi.py: Error reading game state:", e)
@@ -107,15 +115,27 @@ def compute_reward():
     """
     Compute and return (rewardN, terminalN, speed, lap_progress) for the current frame.
     """
-    global last_lap_progress
+    global last_lap_progress, prev_drift_value
     state_info = read_game_state()
     if state_info is None:
         print("state info error")
         return 0.0, False, 0.0, 0.0
     speed = state_info['speed']
     lap_progress = state_info['lap_progress']
+    drift_value = state_info.get('drift_value', 0)
+    death_value = state_info.get('death_value', 0)
+    
     rewardN = 0.0
     terminalN = False
+    
+    # Drift penalty logic
+    # Penalize if drift was abandoned before completion (1 reward point)
+    if prev_drift_value > 0 and prev_drift_value < 270 and drift_value < prev_drift_value:
+        rewardN -= 1.0
+    
+    # Update previous drift value for next frame
+    prev_drift_value = drift_value
+    
     if last_lap_progress is None:
         last_lap_progress = lap_progress
     lap_diff = lap_progress - last_lap_progress
@@ -125,13 +145,16 @@ def compute_reward():
         if int(lap_progress) > int(last_lap_progress) and int(last_lap_progress) != 0:
             rewardN += 3.3
         last_lap_progress = lap_progress
-    if speed < 65:
+    if speed < 55:
         rewardN -= 10.0
         terminalN = True
     elif speed > 90:
         rewardN += 0.025
     if lap_progress >= 4.0:
         rewardN += 10.0
+        terminalN = True
+    if death_value == 1:
+        rewardN += 10.0       
         terminalN = True
     return rewardN, terminalN, speed, lap_progress
 
@@ -209,24 +232,34 @@ def reset_environment(initial=False):
     Reset game state and clear the frame stack.
     In addition, set the new_episode flag so that the next call to process_frame will reinitialize the state.
     """
-    global last_lap_progress, frame_stack, last_reward, frame_num, new_episode, drift_counter
+    global last_lap_progress, frame_stack, last_reward, frame_num, new_episode, drift_counter, prev_drift_value
     last_lap_progress = None
     last_reward = 0
     frame_num = 0
     frame_stack.clear()
     new_episode = True  # Force reinitialization of the frame stack on the next frame.
     drift_counter = 0
+    prev_drift_value = 0  # Reset the drift value tracker
     if not initial:
         reset_choice = random.randint(1, 4)
-        reset_choice = 1
-        if reset_choice == 1:
-            savestate.load_from_file(r"E:\MKWii_Savestates\funky_flame_delfino_savestate_startv2.sav")
-        elif reset_choice == 2:
-            savestate.load_from_file(r"E:\MKWii_Savestates\funky_flame_delfino_savestate2.sav")
-        elif reset_choice == 3:
-            savestate.load_from_file(r"E:\MKWii_Savestates\funky_flame_delfino_savestate3.sav")
-        elif reset_choice == 4:
-            savestate.load_from_file(r"E:\MKWii_Savestates\funky_flame_delfino_savestate4.sav")
+        if user == "Zach":
+            if reset_choice == 1:
+                savestate.load_from_file(r"E:\MKWii_Savestates\funky_flame_delfino_savestate_startv2.sav")
+            elif reset_choice == 2:
+                savestate.load_from_file(r"E:\MKWii_Savestates\funky_flame_delfino_savestate2.sav")
+            elif reset_choice == 3:
+                savestate.load_from_file(r"E:\MKWii_Savestates\funky_flame_delfino_savestate3.sav")
+            elif reset_choice == 4:
+                savestate.load_from_file(r"E:\MKWii_Savestates\funky_flame_delfino_savestate4.sav")
+        elif user == "Nolan":
+            if reset_choice == 1:
+                savestate.load_from_file(r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_delfino_savestate_startv2.sav")
+            elif reset_choice == 2:
+                savestate.load_from_file(r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_delfino_savestate2.sav")
+            elif reset_choice == 3:
+                savestate.load_from_file(r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_delfino_savestate3.sav")
+            elif reset_choice == 4:
+                savestate.load_from_file(r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_delfino_savestate4.sav")
 
 ##############################################################################
 # Main loop with persistent connection, asynchronous awaits, frameskip, sequential stacking,
@@ -265,16 +298,6 @@ while True:
         cmd = command.get("command")
         if cmd == "step":
             action = command.get("action", 0)
-
-            # --- Drift Penalty Check ---
-            # If the previous action was a drift and the new action is either not drifting
-            # or is a different drift than before, and the drift duration was less than 14 frames,
-            # apply a penalty of 0.1 to the reward.
-            penalty = 0.0
-            if prev_action is not None and (prev_action in drift_actions):
-                if (action not in drift_actions) or (action in drift_actions and action != prev_action):
-                    if drift_counter < 14:
-                        penalty = 0.1
 
             reward = 0.0
             terminal = False
@@ -323,10 +346,7 @@ while True:
                 raw_img = Image.frombytes('RGB', (width, height), data_bytes, 'raw')
                 new_obs = process_frame(raw_img, terminal=False)
 
-            # Apply the drift penalty if applicable.
-            reward -= penalty
-
-            # Update drift_counter based on the current action.
+            # Update drift_counter for tracking purposes only (not used for penalty anymore)
             if action in drift_actions:
                 if prev_action == action:
                     drift_counter += frame_skip
