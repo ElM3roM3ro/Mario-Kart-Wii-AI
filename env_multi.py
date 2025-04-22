@@ -56,6 +56,8 @@ def reset_frame_stack(processed_frame):
     Clears the current frame stack and fills it with copies of the provided processed_frame.
     Returns the newly constructed frame stack (as a numpy array).
     """
+    global frame_stack
+
     frame_stack.clear()
     for _ in range(frame_stack_size):
         frame_stack.append(processed_frame.copy())
@@ -68,7 +70,7 @@ def process_frame(raw_img, terminal=False):
     then the frame stack is reinitialized by duplicating the processed frame.
     Otherwise, the new frame is appended to the existing stack.
     """
-    global new_episode
+    global new_episode, frame_stack
     try:
         image = raw_img.convert("L").resize((target_width, target_height), Image.BILINEAR)
     except Exception as e:
@@ -250,7 +252,7 @@ def reset_environment(initial=False):
     last_lap_progress = None
     last_reward = 0
     frame_num = 0
-    frame_stack.clear()
+    #frame_stack.clear()
     new_episode = True  # Force reinitialization of the frame stack on the next frame.
     drift_counter = 0
     prev_drift_value = 0  # Reset the drift value tracker
@@ -352,7 +354,7 @@ while True:
                 for _ in range(2):
                     await event.frameadvance()
                 reset_environment(initial=False)
-                for _ in range(1):
+                for _ in range(2):
                     await event.frameadvance()
                 frame_data = await event.framedrawn()
                 width, height, data_bytes = frame_data

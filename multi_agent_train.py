@@ -186,8 +186,7 @@ class VecDolphinEnv:
         next_obs, rewards, terminals, episode_rewards = [], [], [], []
         for i, trans in enumerate(transitions):
             self.current_obs[i] = trans["next_observation"]
-            obs_tensor = torch.from_numpy(trans["next_observation"]).float().to('cuda')
-            next_obs.append(obs_tensor)
+            next_obs.append(trans["next_observation"])
             rewards.append(trans["reward"])
             terminals.append(trans["terminal"])
             episode_rewards.append(trans["episode_rewards"] if trans["terminal"] else None)
@@ -309,6 +308,7 @@ def main():
     last_plot_time       = time.time()      # hourly timer
     try:
         env = VecDolphinEnv(num_envs, frame_skip=4)
+        obs = env.current_obs
         agent = BTRAgent(
             n_actions=6,
             input_dims=(4, 128, 128),  # Ensure these match the target resolution in env_multi.py.
@@ -336,25 +336,19 @@ def main():
 
         while True:
             total_steps += num_envs
-            batch_obs = []
-            batch_obs_np = []
-            for i in range(num_envs):
-                # Preserve the original numpy observation
-                batch_obs_np.append(env.current_obs[i])
-                obs_tensor = torch.from_numpy(env.current_obs[i]).float().to('cuda')
-                batch_obs.append(obs_tensor.unsqueeze(0))
-            batch_obs = torch.cat(batch_obs, dim=0)
+            obs_tensor = torch.from_numpy(np.copy(obs)).to(agent.device).float()
             if total_steps >= 4000:
-                actions = agent.choose_action(batch_obs, debug=debug_mode)
+                actions = agent.choose_action(obs_tensor, debug=debug_mode)
             else:
-                actions = agent.choose_action(batch_obs)
+                actions = agent.choose_action(obs_tensor)
             next_obs, rewards, terminals, epi_rewards = env.step(actions.numpy())
             for i in range(num_envs):
                 # Store transitions using the original numpy observations.
-                agent.store_transition(batch_obs_np[i], actions[i].item(), rewards[i], env.current_obs[i], terminals[i], i)
+                agent.store_transition(obs[i], actions[i].item(), rewards[i], next_obs[i], terminals[i], i)
                 if epi_rewards[i] is not None:
                     episode_rewards_log.append(epi_rewards[i])
-            
+            obs = next_obs
+
             #--- Debug Saving ---
             if print_frames:
                 debug_dir = "debug_data_after_store"
@@ -364,7 +358,7 @@ def main():
                 for worker in range(num_envs):
                     worker_folder = os.path.join(step_folder, f"worker_{worker}")
                     os.makedirs(worker_folder, exist_ok=True)
-                    obs_stack = batch_obs[worker].clone().cpu().squeeze(0)
+                    obs_stack = obs[worker].clone().cpu().squeeze(0)
                     next_stack = next_obs[worker].clone().cpu()
                     for frame_idx in range(obs_stack.shape[0]):
                         obs_filename = os.path.join(worker_folder, f"worker_{worker}_obs_frame_{frame_idx}_step_{total_steps}.png")
