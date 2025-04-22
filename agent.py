@@ -9,6 +9,7 @@ from functools import partial
 from networks import ImpalaCNNLargeIQN, FactorizedNoisyLinear
 from PER_btr import PER
 import logging
+import matplotlib.pyplot as plt
 
 logging.basicConfig(
     level=logging.INFO,
@@ -299,9 +300,45 @@ class BTRAgent:
 
         self.optimizer.zero_grad()
 
+        #use this code to check your states are correct
+        # x = np.random.randint(0,200)
+        # print(dones[x])
+        # print(rewards[x])
+        # fig, axes = plt.subplots(1, 4, figsize=(12, 3))
+
+        # axes[0].imshow(states[x][0].unsqueeze(0).cpu().permute(1, 2, 0))
+        # axes[0].set_title("state first frame")
+        # axes[0].axis("off")
+
+        # axes[1].imshow(next_states[x][0].unsqueeze(0).cpu().permute(1, 2, 0))
+        # axes[1].set_title("next state first frame")
+        # axes[1].axis("off")
+
+        # axes[2].imshow(states[x][-1].unsqueeze(0).cpu().permute(1, 2, 0))
+        # axes[2].set_title("state last frame")
+        # axes[2].axis("off")
+
+        # axes[3].imshow(next_states[x][-1].unsqueeze(0).cpu().permute(1, 2, 0))
+        # axes[3].set_title("next state last frame")
+        # axes[3].axis("off")
+
+        # plt.tight_layout()
+        # plt.show()
+        
+        # plt.imshow(states[0][1].unsqueeze(dim=0).cpu().permute(1, 2, 0))
+        # plt.show()
+        
+        # plt.imshow(states[0][2].unsqueeze(dim=0).cpu().permute(1, 2, 0))
+        # plt.show()
+        
+        # plt.imshow(states[1][0].unsqueeze(dim=0).cpu().permute(1, 2, 0))
+        # plt.show()
+        
+        # plt.imshow(states[2][0].unsqueeze(dim=0).cpu().permute(1, 2, 0))
+        # plt.show()
+
         with torch.amp.autocast(device_type=self.device):
             if self.iqn and self.munchausen:
-                # [The rest of your learn_call code for munchausen IQN training]
                 with torch.no_grad():
                     Q_targets_next, _ = self.tgt_net(next_states)
                     q_t_n = Q_targets_next.mean(dim=1)
@@ -333,46 +370,14 @@ class BTRAgent:
 
         self.memory.update_priorities(idxs, loss_v.cpu().detach().numpy())
 
-        if self.analytics:
-            with torch.no_grad():
-                self.analytic_object.add_loss(loss.cpu().detach())
         self.scaler.scale(loss).backward()
-
-        if self.analytics:
-            with torch.no_grad():
-                grad_magnitude = self.compute_gradient_magnitude()
-                self.analytic_object.add_grad_mag(grad_magnitude.cpu().detach().item())
-                self.all_grad_mag += grad_magnitude.cpu().detach().item()
-                if not self.iqn:
-                    qvals = Q_expected
-                elif self.munchausen:
-                    qvals = q_k_target.mean(dim=1)
-                else:
-                    qvals = Q_expected.mean(dim=1)
-                self.analytic_object.add_qvals(qvals.cpu().detach())
-                if self.grad_steps % 1 == 0:
-                    _, churn_states, _, _, _, _, _ = self.memory.sample(self.batch_size)
-                    churn_qvals_before = self.net.qvals(churn_states)
-                    churn_actions_before = T.argmax(churn_qvals_before, dim=1).cpu()
-
+        
+        self.scaler.unscale_(self.optimizer)
         T.nn.utils.clip_grad_norm_(self.net.parameters(), self.grad_clip)
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.optimizer.zero_grad()
 
-        if self.analytics and self.grad_steps % 1 == 0:
-            with torch.no_grad():
-                churn_qvals_after = self.net.qvals(churn_states)
-                churn_actions_after = T.argmax(churn_qvals_after, dim=1).cpu()
-                difference = torch.mean(churn_qvals_after - churn_qvals_before, dim=0)
-                self.analytic_object.add_churn_dif(difference.cpu().detach())
-                difference_actions = torch.sum((churn_actions_before != churn_actions_after).int(), dim=0)
-                policy_churn = difference_actions / self.batch_size
-                self.analytic_object.add_churn(policy_churn.cpu().detach().item())
-                self.tot_churns += 1
-                self.cum_churns += policy_churn.cpu().detach().item()
-                print(f"Churns: {self.cum_churns / self.tot_churns}")
-                self.analytic_object.add_churn_actions(actions.cpu().detach())
         self.grad_steps += 1
         if self.grad_steps % 10000 == 0:
             print("Completed " + str(self.grad_steps) + " gradient steps")
