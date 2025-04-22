@@ -20,6 +20,32 @@ logging.basicConfig(
     ]
 )
 
+def save_avg_reward_vs_frames(frames_history, avg_reward_history,
+                              filepath="avg_reward_vs_frames.png"):
+    """
+    Plot running‑average episode reward against TOTAL frames processed.
+
+    Parameters
+    ----------
+    frames_history : list[int]
+        Cumulative frames processed at each snapshot (x‑coordinates).
+    avg_reward_history : list[float]
+        Running average episode reward at the same snapshots (y‑coordinates).
+    """
+    if not frames_history or len(frames_history) != len(avg_reward_history):
+        logging.warning("Frame / reward history length mismatch – plot skipped.")
+        return
+
+    plt.figure()
+    plt.plot(frames_history, avg_reward_history, marker='o')
+    plt.xlabel("Total Frames Processed")
+    plt.ylabel("Average Episode Reward")
+    plt.title("Training Progress")
+    plt.tight_layout()
+    plt.savefig(filepath)
+    plt.close()
+    logging.info("Progress plot saved to %s", filepath)
+
 # --- Persistent Client for a Long-Lived Connection ---
 class PersistentClient:
     def __init__(self, address, authkey=b'secret', timeout=12.0, retries=10, delay=1.0):
@@ -144,23 +170,29 @@ class VecDolphinEnv:
 
     # Updated step function: converts using the existing NumPy array without extra wrapping.
     def step(self, actions):
+        """Return next_obs, rewards, terminals, episode_rewards."""
         transitions = [None] * self.num_envs
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [executor.submit(self.persistent_clients[i].send,
-                                         {"command": "step", "action": actions[i]})
-                       for i in range(self.num_envs)]
+            futures = [
+                executor.submit(
+                    self.persistent_clients[i].send,
+                    {"command": "step", "action": actions[i]}
+                )
+                for i in range(self.num_envs)
+            ]
             for i, future in enumerate(futures):
                 transitions[i] = future.result()
-        next_obs = []
-        rewards = []
-        terminals = []
+
+        next_obs, rewards, terminals, episode_rewards = [], [], [], []
         for i, trans in enumerate(transitions):
             self.current_obs[i] = trans["next_observation"]
             obs_tensor = torch.from_numpy(trans["next_observation"]).float().to('cuda')
             next_obs.append(obs_tensor)
             rewards.append(trans["reward"])
             terminals.append(trans["terminal"])
-        return next_obs, rewards, terminals
+            episode_rewards.append(trans["episode_rewards"] if trans["terminal"] else None)
+
+        return next_obs, rewards, terminals, episode_rewards
 
     def close(self):
         for proc in self.process_handles:
@@ -271,17 +303,22 @@ def main():
     num_envs = 4
     debug_mode = False
     print_frames = False
+    episode_rewards_log = []                # all finished‑episode returns
+    frames_history       = []               # x‑coords for hourly snapshots
+    avg_reward_history   = []               # y‑coords for hourly snapshots
+    last_plot_time       = time.time()      # hourly timer
     try:
         env = VecDolphinEnv(num_envs, frame_skip=4)
         agent = BTRAgent(
-            n_actions=7,
+            n_actions=6,
             input_dims=(4, 128, 128),  # Ensure these match the target resolution in env_multi.py.
             device='cuda',
             num_envs=num_envs,
             agent_name='BTRAgent',
             total_frames=200000000,
-            testing=True,
+            testing=False,
             replay_period=64,
+            per_beta_anneal=True,
         )
 
         agent.loading_checkpoint = False
@@ -311,10 +348,12 @@ def main():
                 actions = agent.choose_action(batch_obs, debug=debug_mode)
             else:
                 actions = agent.choose_action(batch_obs)
-            next_obs, rewards, terminals = env.step(actions.numpy())
+            next_obs, rewards, terminals, epi_rewards = env.step(actions.numpy())
             for i in range(num_envs):
                 # Store transitions using the original numpy observations.
                 agent.store_transition(batch_obs_np[i], actions[i].item(), rewards[i], env.current_obs[i], terminals[i], i)
+                if epi_rewards[i] is not None:
+                    episode_rewards_log.append(epi_rewards[i])
             
             #--- Debug Saving ---
             if print_frames:
@@ -334,13 +373,25 @@ def main():
                         plt.imsave(next_filename, next_stack[frame_idx].numpy(), cmap='gray')
                 #--- End Debug Saving ---
             
-            if agent.memory.capacity % 1000 == 0:
+            if agent.memory.capacity % 1024 == 0 and agent.memory.capacity < 1048576:
                 if agent.memory.capacity < 200000:
                     logging.info(f"Burn-in: {(agent.memory.capacity / 200000) * 100}%")
                 else:
                     logging.info(f"Buffer size = {agent.memory.capacity}")
             if agent.env_steps % 64 == 0:
                 agent.learn()
+
+            # ------------- hourly plot update -------------------------------
+            if (time.time() - last_plot_time) >= 600 and episode_rewards_log:
+                total_frames = total_steps * 4
+                avg_reward   = np.mean(episode_rewards_log)
+
+                frames_history.append(total_frames)
+                avg_reward_history.append(avg_reward)
+
+                save_avg_reward_vs_frames(frames_history, avg_reward_history)
+
+                last_plot_time = time.time()
 
             # NEW: Trigger evaluation every 250K environment steps.
             # if agent.env_steps >= next_eval_steps:

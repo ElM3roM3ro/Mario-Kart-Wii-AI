@@ -2,7 +2,7 @@ import time
 import collections
 import sys
 # Set up site–packages path.
-user = "Nolan"
+user = "Zach"
 if user == "Nolan":
     sys.path.append(r"C:\Users\nolan\AppData\Local\Programs\Python\Python312\Lib\site-packages")
 elif user == "Zach":
@@ -115,7 +115,7 @@ def compute_reward():
     """
     Compute and return (rewardN, terminalN, speed, lap_progress) for the current frame.
     """
-    global last_lap_progress, prev_drift_value
+    global last_lap_progress, prev_drift_value, prev_action, current_action
     state_info = read_game_state()
     if state_info is None:
         print("state info error")
@@ -127,11 +127,27 @@ def compute_reward():
     
     rewardN = 0.0
     terminalN = False
+
+    if current_action in {1, 3}:
+        current_drift_side = "L"
+    elif current_action in {2, 4}:
+        current_drift_side = "R"
+    else:
+        current_drift_side = ""
+    
+    if prev_action in {1, 3}:
+        previous_drift_side = "L"
+    elif current_action in {2, 4}:
+        previous_drift_side = "R"
+    else:
+        previous_drift_side = ""
     
     # Drift penalty logic
     # Penalize if drift was abandoned before completion (1 reward point)
-    if prev_drift_value > 0 and prev_drift_value < 270 and drift_value < prev_drift_value:
-        rewardN -= 1.0
+    # if prev_action in drift_actions:
+    #     switched_side = (current_action not in drift_actions or current_drift_side != previous_drift_side)
+    #     if switched_side and (prev_drift_value == 0 or prev_drift_value < 270):
+    #         rewardN -= 3.0
     
     # Update previous drift value for next frame
     prev_drift_value = drift_value
@@ -139,26 +155,24 @@ def compute_reward():
     if last_lap_progress is None:
         last_lap_progress = lap_progress
     lap_diff = lap_progress - last_lap_progress
-    if lap_diff >= 0.01:
-        num_increments = int(lap_diff / 0.01)
+    if lap_diff >= 0.005:
+        num_increments = int(lap_diff / 0.005)
         rewardN += 1.0 * num_increments
         if int(lap_progress) > int(last_lap_progress) and int(last_lap_progress) != 0:
             rewardN += 3.3
         last_lap_progress = lap_progress
-    if speed < 55:
+    if speed < 55 or death_value == 1:
         rewardN -= 10.0
         terminalN = True
-    elif speed > 90:
-        rewardN += 0.025
+    #elif speed > 90:
+        #rewardN += 0.025
     if lap_progress >= 4.0:
         rewardN += 10.0
-        terminalN = True
-    if death_value == 1:
-        rewardN += 10.0       
         terminalN = True
     return rewardN, terminalN, speed, lap_progress
 
 # --- New Global Variables for Drift Action Tracking ---
+current_action = None
 prev_action = None         # Tracks the previous action selected.
 drift_counter = 0          # Counts the number of frames a drift action was held.
 drift_actions = {1, 2, 3, 4} # Actions considered to be drift actions.
@@ -232,7 +246,7 @@ def reset_environment(initial=False):
     Reset game state and clear the frame stack.
     In addition, set the new_episode flag so that the next call to process_frame will reinitialize the state.
     """
-    global last_lap_progress, frame_stack, last_reward, frame_num, new_episode, drift_counter, prev_drift_value
+    global last_lap_progress, frame_stack, last_reward, frame_num, new_episode, drift_counter, prev_drift_value, current_action, prev_action, episode_accum
     last_lap_progress = None
     last_reward = 0
     frame_num = 0
@@ -240,8 +254,12 @@ def reset_environment(initial=False):
     new_episode = True  # Force reinitialization of the frame stack on the next frame.
     drift_counter = 0
     prev_drift_value = 0  # Reset the drift value tracker
+    current_action = None
+    prev_action = None
+    episode_accum = 0.0
     if not initial:
         reset_choice = random.randint(1, 4)
+        #reset_choice = 1
         if user == "Zach":
             if reset_choice == 1:
                 savestate.load_from_file(r"E:\MKWii_Savestates\funky_flame_delfino_savestate_startv2.sav")
@@ -273,6 +291,8 @@ print(f"env_multi.py: Listening on {address} for persistent connection.")
 conn = listener.accept()
 print("env_multi.py: Persistent connection established.")
 
+episode_accum = 0.0
+
 # --- Build the Initial Observation ---
 reset_environment(initial=True)
 initial_obs = None
@@ -288,105 +308,80 @@ while initial_obs is None:
 conn.send({"command": "reset", "observation": np.copy(initial_obs)})
 
 while True:
-    try:
-        command = conn.recv()
-    except Exception as e:
-        print("env_multi.py: Error receiving command:", e)
-        break
+    command = conn.recv()
+    if not isinstance(command, dict):
+        print("env_multi.py: Received unknown command.")
+        continue
 
-    if isinstance(command, dict):
-        cmd = command.get("command")
-        if cmd == "step":
-            action = command.get("action", 0)
+    if command.get("command") == "step":
+        action = command.get("action", 0)
+        current_action = action
 
-            reward = 0.0
-            terminal = False
+        try:
+            gp = read_game_state()
+            if gp is not None:
+                lp = gp["lap_progress"]
+                frac = lp - int(lp)
+                if 0.587 <= frac <= 0.588:
+                    action = 6            # force special action
+        except Exception as e:
+            print(f"[env] Lap‑progress override failed: {e}")
 
-            # Frameskip loop: process multiple frames and accumulate rewards.
-            for i in range(frame_skip):
-                apply_action(action)
-                if i == frame_skip - 1:
-                    # On the last frame, draw a new frame.
-                    frame_data = await event.framedrawn()
-                    try:
-                        width, height, data_bytes = frame_data
-                    except Exception as e:
-                        print("env_multi.py: Error unpacking frame data:", e)
-                        continue
-                else:
-                    await event.frameadvance()
+        reward = 0.0
+        terminal = False
+        final_episode_reward = None  # will be set if a terminal is reached
 
-                # Compute per-frame reward and terminal flag.
-                rewardN, terminalN, speed, lap_progress = compute_reward()
-                terminal = terminal or terminalN
-                reward += rewardN
-
-                if terminal:
-                    # Terminal branch: advance extra frames and reset environment.
-                    for j in range(2):
-                        #apply_action(action)
-                        await event.frameadvance()
-                    reset_environment(initial=False)
-                    for j in range(1):
-                        #apply_action(action)
-                        await event.frameadvance()
-                    frame_data = await event.framedrawn()
-                    try:
-                        width, height, data_bytes = frame_data
-                    except Exception as e:
-                        print("env_multi.py: Error unpacking frame data after terminal:", e)
-                        continue
-                    # Process the frame with terminal=True to create a terminal observation.
-                    new_obs = process_frame(Image.frombytes('RGB', (width, height), data_bytes, 'raw'), terminal=True)
-                    break  # Exit frameskip loop on terminal.
-                frame_num += 1
-
-            # If not terminal, process the final frame normally.
-            if not terminal:
-                raw_img = Image.frombytes('RGB', (width, height), data_bytes, 'raw')
-                new_obs = process_frame(raw_img, terminal=False)
-
-            # Update drift_counter for tracking purposes only (not used for penalty anymore)
-            if action in drift_actions:
-                if prev_action == action:
-                    drift_counter += frame_skip
-                else:
-                    drift_counter = frame_skip
-            else:
-                drift_counter = 0
-            prev_action = action
-
-            transition = {
-                "observation": np.copy(initial_obs),
-                "action": action,
-                "reward": reward,
-                "next_observation": np.copy(new_obs),
-                "terminal": terminal,
-                "speed": speed,
-                "lap_progress": lap_progress
-            }
-
-            conn.send(transition)
-            # For the next step, update the current observation.
-            initial_obs = new_obs
-        elif cmd == "reset":
-            # Handle a reset command here:
-            reset_environment(initial=False)
-            
-            # Get a new frame after reset:
-            frame_data = await event.framedrawn()
-            try:
+        # Frameskip loop
+        for i in range(frame_skip):
+            apply_action(action)
+            if i == frame_skip - 1:
+                frame_data = await event.framedrawn()
                 width, height, data_bytes = frame_data
-            except Exception as e:
-                print("env_multi.py: Error unpacking frame data after reset:", e)
-                continue
+            else:
+                await event.frameadvance()
+
+            # --- per‑frame reward ---
+            rewardN, terminalN, _, _ = compute_reward()
+            reward += rewardN
+            episode_accum += rewardN  # accumulate *per‑frame* reward correctly
+            terminal = terminal or terminalN
+
+            if terminal:
+                final_episode_reward = episode_accum  # capture before reset
+                # advance a couple frames, then hard reset
+                for _ in range(2):
+                    await event.frameadvance()
+                reset_environment(initial=False)
+                for _ in range(1):
+                    await event.frameadvance()
+                frame_data = await event.framedrawn()
+                width, height, data_bytes = frame_data
+                new_obs = process_frame(Image.frombytes('RGB', (width, height), data_bytes, 'raw'), terminal=True)
+                break
+
+        # Non‑terminal path: process final frame normally
+        if not terminal:
             raw_img = Image.frombytes('RGB', (width, height), data_bytes, 'raw')
-            # Use terminal=True or False depending on how you wish to signal the reset.
-            new_obs = process_frame(raw_img, terminal=True)
-            
-            # Send back the reset response with new initial observation.
-            conn.send({"command": "reset", "observation": np.copy(new_obs)})
-        else:
-            print("env_multi.py: Received unknown command.")
+            new_obs = process_frame(raw_img, terminal=False)
+
+        transition = {
+            "observation": np.copy(initial_obs),
+            "action": action,
+            "reward": reward,
+            "next_observation": np.copy(new_obs),
+            "terminal": terminal,
+            "episode_rewards": final_episode_reward if terminal else None
+        }
+        conn.send(transition)
+        initial_obs = new_obs
+        prev_action = action
+
+    elif command.get("command") == "reset":
+        reset_environment(initial=False)
+        frame_data = await event.framedrawn()
+        width, height, data_bytes = frame_data
+        raw_img = Image.frombytes('RGB', (width, height), data_bytes, 'raw')
+        new_obs = process_frame(raw_img, terminal=True)
+        conn.send({"command": "reset", "observation": np.copy(new_obs)})
     else:
         print("env_multi.py: Received unknown command.")
