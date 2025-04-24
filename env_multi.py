@@ -2,7 +2,7 @@ import time
 import collections
 import sys
 # Set up site–packages path.
-user = "Zach"
+user = "Nolan"
 if user == "Nolan":
     sys.path.append(r"C:\Users\nolan\AppData\Local\Programs\Python\Python312\Lib\site-packages")
 elif user == "Zach":
@@ -42,6 +42,7 @@ target_height = 128
 # Global frame stack used to form the state.
 frame_stack = collections.deque(maxlen=frame_stack_size)
 last_lap_progress = None   # For reward computation.
+last_checkpoint_progress = None
 last_reward = 0            # Accumulated reward over frameskip.
 frame_num = 0              # Frame counter.
 
@@ -94,20 +95,33 @@ def process_frame(raw_img, terminal=False):
 
 def read_game_state():
     try:
-        speed = memory.read_f32(0x80fad2c4)
-        lap_progress = memory.read_f32(0x80e48d3c)
+        # speed = memory.read_f32(0x80fad2c4)
+        # lap_progress = memory.read_f32(0x80e48d3c)
+        # current_lap = int(memory.read_f32(0x80e96428))
+        # max_lap = int(memory.read_f32(0x80e96428))
+        # # Read the drift value from memory
+        # drift_value = memory.read_u16(0x80e51d86)
+        # death_value = memory.read_u8(0x80facb39)
+
+
+        #LUIGI
+        speed = memory.read_f32(0x80f9cbec)
+        lap_progress = memory.read_f32(0x80e44d24)
         current_lap = int(memory.read_f32(0x80e96428))
         max_lap = int(memory.read_f32(0x80e96428))
         # Read the drift value from memory
-        drift_value = memory.read_u16(0x80e51d86)
-        death_value = memory.read_u8(0x80facb39)
+        drift_value = memory.read_u16(0x80e4dd72)
+        death_value = 0
+        wheelie_value = memory.read_u8(0x80f9c470)
+
         return {
             'speed': speed,
             'lap_progress': lap_progress,
             'current_lap': current_lap,
             'max_lap': max_lap,
             'drift_value': drift_value,
-            'death_value': death_value
+            'death_value': death_value,
+            'wheelie_value' : wheelie_value
         }
     except Exception as e:
         print("env_multi.py: Error reading game state:", e)
@@ -117,7 +131,7 @@ def compute_reward():
     """
     Compute and return (rewardN, terminalN, speed, lap_progress) for the current frame.
     """
-    global last_lap_progress, prev_drift_value, prev_action, current_action
+    global last_checkpoint_progress, last_lap_progress, prev_drift_value, prev_action, current_action
     state_info = read_game_state()
     if state_info is None:
         print("state info error")
@@ -126,51 +140,42 @@ def compute_reward():
     lap_progress = state_info['lap_progress']
     drift_value = state_info.get('drift_value', 0)
     death_value = state_info.get('death_value', 0)
+    wheelie_value = state_info.get('wheelie_value', 0)
     
     rewardN = 0.0
     terminalN = False
 
-    if current_action in {1, 3}:
-        current_drift_side = "L"
-    elif current_action in {2, 4}:
-        current_drift_side = "R"
-    else:
-        current_drift_side = ""
-    
-    if prev_action in {1, 3}:
-        previous_drift_side = "L"
-    elif current_action in {2, 4}:
-        previous_drift_side = "R"
-    else:
-        previous_drift_side = ""
-    
-    # Drift penalty logic
-    # Penalize if drift was abandoned before completion (1 reward point)
-    # if prev_action in drift_actions:
-    #     switched_side = (current_action not in drift_actions or current_drift_side != previous_drift_side)
-    #     if switched_side and (prev_drift_value == 0 or prev_drift_value < 270):
-    #         rewardN -= 3.0
-    
-    # Update previous drift value for next frame
-    prev_drift_value = drift_value
-    
+
+    #last_lap_progress calculates progress from last frame
     if last_lap_progress is None:
         last_lap_progress = lap_progress
-    lap_diff = lap_progress - last_lap_progress
-    if lap_diff >= 0.005:
-        num_increments = int(lap_diff / 0.005)
+    #last_checkpoint calculates distance from last checkpoint
+    if last_checkpoint_progress is None:
+        last_checkpoint_progress = lap_progress
+    lap_diff_from_last_checkpoint = lap_progress - last_checkpoint_progress
+
+    lap_diff_from_last_frame = lap_progress - last_lap_progress
+    rewardN += (lap_diff_from_last_frame * 2)
+    last_lap_progress = lap_progress
+
+    if lap_diff_from_last_checkpoint >= 0.005:
+        num_increments = int(lap_diff_from_last_checkpoint / 0.005)
         rewardN += 1.0 * num_increments
-        if int(lap_progress) > int(last_lap_progress) and int(last_lap_progress) != 0:
+        if int(lap_progress) > int(last_checkpoint_progress) and int(last_checkpoint_progress) != 0:
             rewardN += 3.3
-        last_lap_progress = lap_progress
+        last_checkpoint_progress = lap_progress
+
     if speed < 55 or death_value == 1:
         rewardN -= 10.0
         terminalN = True
-    #elif speed > 90:
-        #rewardN += 0.025
+
+    if wheelie_value:
+        rewardN += .005
+
     if lap_progress >= 4.0:
         rewardN += 10.0
         terminalN = True
+
     return rewardN, terminalN, speed, lap_progress
 
 # --- New Global Variables for Drift Action Tracking ---
@@ -250,6 +255,7 @@ def reset_environment(initial=False):
     """
     global last_lap_progress, frame_stack, last_reward, frame_num, new_episode, drift_counter, prev_drift_value, current_action, prev_action, episode_accum
     last_lap_progress = None
+    last_checkpoint_progress = None
     last_reward = 0
     frame_num = 0
     #frame_stack.clear()
@@ -260,8 +266,8 @@ def reset_environment(initial=False):
     prev_action = None
     episode_accum = 0.0
     if not initial:
-        reset_choice = random.randint(1, 4)
-        #reset_choice = 1
+        #reset_choice = random.randint(1, 4)
+        reset_choice = 1
         if user == "Zach":
             if reset_choice == 1:
                 savestate.load_from_file(r"E:\MKWii_Savestates\funky_flame_delfino_savestate_startv2.sav")
@@ -272,14 +278,22 @@ def reset_environment(initial=False):
             elif reset_choice == 4:
                 savestate.load_from_file(r"E:\MKWii_Savestates\funky_flame_delfino_savestate4.sav")
         elif user == "Nolan":
+            # if reset_choice == 1:
+            #     savestate.load_from_file(r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_delfino_savestate_startv2.sav")
+            # elif reset_choice == 2:
+            #     savestate.load_from_file(r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_delfino_savestate2.sav")
+            # elif reset_choice == 3:
+            #     savestate.load_from_file(r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_delfino_savestate3.sav")
+            # elif reset_choice == 4:
+            #     savestate.load_from_file(r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_delfino_savestate4.sav")
+
+            #luigi circut
             if reset_choice == 1:
-                savestate.load_from_file(r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_delfino_savestate_startv2.sav")
+                savestate.load_from_file(r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_luigi_savestate.sav")
             elif reset_choice == 2:
-                savestate.load_from_file(r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_delfino_savestate2.sav")
+                savestate.load_from_file(r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_luigi_savestate2.sav")
             elif reset_choice == 3:
-                savestate.load_from_file(r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_delfino_savestate3.sav")
-            elif reset_choice == 4:
-                savestate.load_from_file(r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_delfino_savestate4.sav")
+                savestate.load_from_file(r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_luigi_savestate3.sav")
 
 ##############################################################################
 # Main loop with persistent connection, asynchronous awaits, frameskip, sequential stacking,
@@ -324,7 +338,7 @@ while True:
             if gp is not None:
                 lp = gp["lap_progress"]
                 frac = lp - int(lp)
-                if 0.587 <= frac <= 0.588:
+                if 0.695 <= frac <= 0.710:
                     action = 6            # force special action
         except Exception as e:
             print(f"[env] Lap‑progress override failed: {e}")
@@ -350,6 +364,8 @@ while True:
 
             if terminal:
                 final_episode_reward = episode_accum  # capture before reset
+                print(episode_accum)
+
                 # advance a couple frames, then hard reset
                 for _ in range(2):
                     await event.frameadvance()

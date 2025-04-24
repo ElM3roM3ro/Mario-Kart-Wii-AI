@@ -86,7 +86,7 @@ class PersistentClient:
 def launch_dolphin_for_worker(worker_id):
     port = 6000 + worker_id
     os.environ["ENV_PORT"] = str(port)
-    user = "Zach"
+    user = "Nolan"
     if user == "Nolan":
         user_dir = f"C:\\Users\\nolan\\DolphinUserDirs\\instance_{worker_id}"
     elif user == "Zach":
@@ -103,7 +103,10 @@ def launch_dolphin_for_worker(worker_id):
     if user == "Nolan":
         paths["dolphin_path"] = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\dolphin-x64-framedrawn-stable\Dolphin.exe"
         paths["script_path"] = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\env_multi.py"
-        paths["savestate_path"] = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_delfino.sav"
+        #delfino
+        #paths["savestate_path"] = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_delfino.sav"
+        #luigi
+        paths["savestate_path"] = r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_luigi_savestate.sav"
         paths["game_path"] = r"C:\Users\nolan\source\repos\dolphin\Source\Core\DolphinQt\MarioKart(Compress).iso"
     elif user == "Zach":
         paths["dolphin_path"] = r"F:\DolphinEmuFork_src\dolphin\Binary\x64\Dolphin.exe"
@@ -299,7 +302,7 @@ def evaluate_agent(agent, eval_client, num_episodes=100, frameskip=4):
 
 def main():
     total_steps = 0
-    num_envs = 4
+    num_envs = 2
     debug_mode = False
     print_frames = False
     episode_rewards_log = []                # all finished‑episode returns
@@ -319,11 +322,9 @@ def main():
             testing=False,
             replay_period=64,
             per_beta_anneal=True,
+            loading_checkpoint=True
         )
 
-        agent.loading_checkpoint = False
-        if agent.loading_checkpoint:
-            agent.load_models(agent.agent_name + ".model")
         loss_logs = []
         episode_rewards = []
 
@@ -376,7 +377,7 @@ def main():
                 agent.learn()
 
             # ------------- hourly plot update -------------------------------
-            if (time.time() - last_plot_time) >= 600 and episode_rewards_log:
+            if (time.time() - last_plot_time) >= 300 and episode_rewards_log:
                 total_frames = total_steps * 4
                 avg_reward   = np.mean(episode_rewards_log)
 
