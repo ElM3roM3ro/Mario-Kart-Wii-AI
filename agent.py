@@ -90,7 +90,7 @@ class BTRAgent:
                  per_beta_anneal=False, layer_norm=False, max_mem_size=1048576, c51=False,
                  eps_steps=2000000, eps_disable=True,
                  activation="relu", n=3, munch_alpha=0.9,
-                 grad_clip=10):
+                 grad_clip=10, loading_checkpoint = False):
         # Set up parameters (defaults taken from Agent_btr.py, with image dimensions updated)
         self.per_alpha = per_alpha if not rainbow else 0.5
         self.procgen = True if input_dims[1] == 64 else False
@@ -102,7 +102,7 @@ class BTRAgent:
         self.testing = testing
         self.activation = activation
         self.layer_norm = layer_norm
-        self.loading_checkpoint = False
+        self.loading_checkpoint = loading_checkpoint
         self.per_beta = 0.45
         self.per_beta_anneal = per_beta_anneal
         if self.per_beta_anneal:
@@ -157,7 +157,7 @@ class BTRAgent:
             self.eps_steps = eps_steps
             self.eps_final = 0.01
         else:
-            self.eps_start = 0.00
+            self.eps_start = 0.01
             self.eps_steps = eps_steps
             self.eps_final = 0.00
         self.eps_disable = eps_disable
@@ -188,7 +188,7 @@ class BTRAgent:
         self.replay_ratio_cnt = 0
         self.eval_mode = False
         if self.loading_checkpoint:
-            self.load_models(self.agent_name)
+            self.load_models(self.agent_name + ".model")
         self.scaler = torch.amp.GradScaler(device=device)
     
     def get_grad_steps(self):

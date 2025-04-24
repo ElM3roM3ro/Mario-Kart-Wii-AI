@@ -319,11 +319,9 @@ def main():
             testing=False,
             replay_period=64,
             per_beta_anneal=True,
+            loading_checkpoint=True,
         )
 
-        agent.loading_checkpoint = False
-        if agent.loading_checkpoint:
-            agent.load_models(agent.agent_name + ".model")
         loss_logs = []
         episode_rewards = []
 
@@ -376,7 +374,7 @@ def main():
                 agent.learn()
 
             # ------------- hourly plot update -------------------------------
-            if (time.time() - last_plot_time) >= 600 and episode_rewards_log:
+            if (time.time() - last_plot_time) >= 300 and episode_rewards_log:
                 total_frames = total_steps * 4
                 avg_reward   = np.mean(episode_rewards_log)
 
