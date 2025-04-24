@@ -322,7 +322,7 @@ def main():
             testing=False,
             replay_period=64,
             per_beta_anneal=True,
-            loading_checkpoint=True
+            loading_checkpoint=True,
         )
 
         loss_logs = []
