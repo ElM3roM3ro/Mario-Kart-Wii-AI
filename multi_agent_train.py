@@ -4,6 +4,8 @@ import torch
 import numpy as np
 import subprocess
 import logging
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import concurrent.futures
 from collections import deque
@@ -258,57 +260,86 @@ def evaluate_agent(agent, eval_client, num_episodes=100, frameskip=4):
     Evaluates the current agent by running 'num_episodes' evaluation episodes.
     Evaluation epsilon is set to 0.01 until total environment frames reach 125M, then 0.
     """
-    # Prepare evaluation network and disable noise.
-    agent.prep_evaluation()  # This creates agent.eval_net and disables noise.
-    
-    # Compute evaluation epsilon based on total environment frames.
-    env_frames = agent.env_steps * frameskip
-    eval_epsilon = 0.01 if env_frames < 125e6 else 0.0
-    logging.info(f"Evaluation Phase: env_frames={env_frames}, using eval_epsilon={eval_epsilon}")
-    
-    episode_rewards = []
-    for ep in range(num_episodes):
-        # Reset the evaluation environment.
-        eval_client.send({"command": "reset"})
-        response = eval_client.conn.recv()
-        obs = response["observation"]
-        done = False
-        ep_reward = 0.0
+    try:
+        # Prepare evaluation network and disable noise.
+        agent.prep_evaluation()  # This creates agent.eval_net and disables noise.
         
-        while not done:
-            # Use the evaluation network with fixed epsilon.
-            action_tensor = choose_eval_action(
-                observation=obs,
-                eval_net=agent.eval_net,
-                n_actions=agent.n_actions,
-                device=agent.device,
-                rng=eval_epsilon
-            )
-            action = int(action_tensor.item() if isinstance(action_tensor, torch.Tensor) else action_tensor)
-            eval_client.send({"command": "step", "action": action})
-            step_response = eval_client.conn.recv()
-            obs = step_response["next_observation"]
-            reward = step_response["reward"]
-            done = step_response["terminal"]
-            ep_reward += reward
-        episode_rewards.append(ep_reward)
-        logging.info(f"Eval Episode {ep+1}/{num_episodes}: Total Reward = {ep_reward}")
-    avg_reward = np.mean(episode_rewards)
-    logging.info(f"Evaluation complete: Average Reward over {num_episodes} episodes = {avg_reward}")
-    return avg_reward
+        # Compute evaluation epsilon based on total environment frames.
+        env_frames = agent.env_steps * frameskip
+        eval_epsilon = 0.01 if env_frames < 125e6 else 0.0
+        logging.info(f"Evaluation Phase: env_frames={env_frames}, using eval_epsilon={eval_epsilon}")
+        
+        episode_rewards = []
+        for ep in range(num_episodes):
+            try:
+                # Reset the evaluation environment.
+                eval_client.send({"command": "reset"})
+                response = eval_client.conn.recv()
+                obs = response["observation"]
+                done = False
+                ep_reward = 0.0
+                
+                while not done:
+                    # Use the evaluation network with fixed epsilon.
+                    try:
+                        action_tensor = choose_eval_action(
+                            observation=obs,
+                            eval_net=agent.eval_net,
+                            n_actions=agent.n_actions,
+                            device=agent.device,
+                            rng=eval_epsilon
+                        )
+                        action = int(action_tensor.item() if isinstance(action_tensor, torch.Tensor) else action_tensor)
+                    except Exception as e:
+                        logging.error(f"Error in evaluation action selection: {e}")
+                        # Default to a random action as fallback
+                        action = np.random.randint(0, agent.n_actions)
+                    
+                    try:
+                        eval_client.send({"command": "step", "action": action})
+                        step_response = eval_client.conn.recv()
+                        obs = step_response["next_observation"]
+                        reward = step_response["reward"]
+                        done = step_response["terminal"]
+                        ep_reward += reward
+                    except Exception as e:
+                        logging.error(f"Error communicating with environment: {e}")
+                        # Skip the rest of this episode
+                        break
+                
+                episode_rewards.append(ep_reward)
+                logging.info(f"Eval Episode {ep+1}/{num_episodes}: Total Reward = {ep_reward}")
+            except Exception as e:
+                logging.error(f"Error in evaluation episode {ep}: {e}")
+                continue
+        
+        if episode_rewards:
+            avg_reward = np.mean(episode_rewards)
+            logging.info(f"Evaluation complete: Average Reward over {len(episode_rewards)} episodes = {avg_reward}")
+            return avg_reward
+        else:
+            logging.error("No valid evaluation episodes completed")
+            return 0.0
+    except Exception as e:
+        logging.error(f"Error in evaluation: {e}")
+        return 0.0
 
 def main():
     total_steps = 0
-    num_envs = 4
+    num_envs = 1
     debug_mode = False
     print_frames = False
     episode_rewards_log = []                # all finished‑episode returns
     frames_history       = []               # x‑coords for hourly snapshots
     avg_reward_history   = []               # y‑coords for hourly snapshots
     last_plot_time       = time.time()      # hourly timer
+    loss_logs = []                          # Initialize loss_logs
+    episode_rewards = []                    # Initialize episode_rewards list
+    env = None                              # Initialize env for safety
     try:
         env = VecDolphinEnv(num_envs, frame_skip=4)
         obs = env.current_obs
+        
         agent = BTRAgent(
             n_actions=6,
             input_dims=(4, 128, 128),  # Ensure these match the target resolution in env_multi.py.
@@ -322,8 +353,9 @@ def main():
             loading_checkpoint=True,
         )
 
-        loss_logs = []
-        episode_rewards = []
+        log_frequency = 1024
+        
+        logging.info("Using standard feed-forward BTRAgent with PER buffer")
 
         # NEW: Set next evaluation threshold in environment steps.
         next_eval_steps = 450000  # Every 250K env steps = 1M frames (if frameskip=4)
@@ -365,9 +397,9 @@ def main():
                         plt.imsave(next_filename, next_stack[frame_idx].numpy(), cmap='gray')
                 #--- End Debug Saving ---
             
-            if agent.memory.capacity % 1024 == 0 and agent.memory.capacity < 1048576:
-                if agent.memory.capacity < 200000:
-                    logging.info(f"Burn-in: {(agent.memory.capacity / 200000) * 100}%")
+            if agent.memory.capacity % log_frequency == 0 and agent.memory.capacity < 1048576:
+                if agent.memory.capacity < agent.min_sampling_size:
+                    logging.info(f"Burn-in: {(agent.memory.capacity / agent.min_sampling_size) * 100}% ({agent.memory.capacity})")
                 else:
                     logging.info(f"Buffer size = {agent.memory.capacity}")
             if agent.env_steps % 64 == 0:
@@ -375,7 +407,7 @@ def main():
 
             # ------------- hourly plot update -------------------------------
             if (time.time() - last_plot_time) >= 300 and episode_rewards_log:
-                total_frames = total_steps * 4
+                total_frames = total_steps * env.frame_skip
                 avg_reward   = np.mean(episode_rewards_log)
 
                 frames_history.append(total_frames)
@@ -383,6 +415,7 @@ def main():
 
                 save_avg_reward_vs_frames(frames_history, avg_reward_history)
 
+                episode_rewards_log.clear()
                 last_plot_time = time.time()
 
             # NEW: Trigger evaluation every 250K environment steps.

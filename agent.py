@@ -45,10 +45,13 @@ def randomise_action_batch(x, probs, n_actions):
 def choose_eval_action(observation, eval_net, n_actions, device, rng):
     with torch.no_grad():
         state = T.tensor(observation, dtype=T.float).to(device)
+        # Handle batch dimension if not present
+        if len(state.shape) == 3:  # (C, H, W)
+            state = state.unsqueeze(0)  # Add batch dimension (1, C, H, W)
         qvals = eval_net.qvals(state, advantages_only=True)
         x = T.argmax(qvals, dim=1).cpu()
         if rng > 0.:
-            x = randomise_action_batch(x, 0.01, n_actions)
+            x = randomise_action_batch(x, rng, n_actions)
     return x
 
 def create_network(impala, iqn, input_dims, n_actions, spectral_norm, device, noisy, maxpool, model_size, maxpool_size,
@@ -60,13 +63,6 @@ def create_network(impala, iqn, input_dims, n_actions, spectral_norm, device, no
                                      maxpool=maxpool, model_size=model_size, num_tau=num_tau, maxpool_size=maxpool_size,
                                      dueling=dueling, linear_size=linear_size, ncos=ncos,
                                      arch=arch, layer_norm=layer_norm, activation=activation)
-        # if c51:
-        #     return ImpalaCNNLargeC51(input_dims[0], n_actions, spectral=spectral_norm, device=device,
-        #                             noisy=noisy, maxpool=maxpool, model_size=model_size, linear_size=linear_size)
-        # else:
-        #     return ImpalaCNNLarge(input_dims[0], n_actions, spectral=spectral_norm, device=device,
-        #                           noisy=noisy, maxpool=maxpool, model_size=model_size, maxpool_size=maxpool_size,
-        #                           linear_size=linear_size)
     else:
         print("ERROR: Model doesn't exist")
 
@@ -157,7 +153,7 @@ class BTRAgent:
             self.eps_steps = eps_steps
             self.eps_final = 0.01
         else:
-            self.eps_start = 0.01
+            self.eps_start = 0.0
             self.eps_steps = eps_steps
             self.eps_final = 0.00
         self.eps_disable = eps_disable
@@ -167,16 +163,26 @@ class BTRAgent:
         self.arch = arch
         self.framestack = framestack
         self.rgb = rgb
-        self.memory = PER(self.max_mem_size, device, self.n, num_envs, self.gamma, alpha=self.per_alpha,
-                          beta=self.per_beta, framestack=self.framestack, rgb=self.rgb, imagex=imagex, imagey=imagey)
+        
+        # Standard PER memory
+        self.memory = PER(
+            max_mem_size, device, self.n, num_envs, self.gamma,
+            alpha=self.per_alpha, beta=self.per_beta,
+            framestack=self.framestack, rgb=self.rgb,
+            imagex=imagex, imagey=imagey
+        )
+        
+        # Create network
         self.network_creator_fn = partial(create_network, self.impala, self.iqn, self.input_dims, self.n_actions,
-                                          self.spectral_norm, self.device,
-                                          self.noisy, self.maxpool, self.model_size, self.maxpool_size,
-                                          self.linear_size,
-                                          self.num_tau, self.dueling, self.ncos,
-                                          self.non_factorised, self.arch, layer_norm=self.layer_norm,
-                                          activation=self.activation, c51=self.c51)
+                                     self.spectral_norm, self.device,
+                                     self.noisy, self.maxpool, self.model_size, self.maxpool_size,
+                                     self.linear_size,
+                                     self.num_tau, self.dueling, self.ncos,
+                                     self.non_factorised, self.arch, layer_norm=self.layer_norm,
+                                     activation=self.activation, c51=self.c51)
         self.net = self.network_creator_fn()
+        
+        # Create target network
         self.tgt_net = self.network_creator_fn()
         self.optimizer = optim.Adam(self.net.parameters(), lr=self.lr, eps=0.005 / self.batch_size)
         self.net.train()
@@ -213,32 +219,39 @@ class BTRAgent:
                 m.disable_noise()
 
     def choose_action(self, observation, debug=False):
-        with T.no_grad():
-            # For noisy networks make sure to reset noise if in training mode.
-            if self.noisy and not self.eval_mode:
-                self.reset_noise(self.net)
+        try:
+            with T.no_grad():
+                # For noisy networks make sure to reset noise if in training mode.
+                if self.noisy and not self.eval_mode:
+                    self.reset_noise(self.net)
+                    
+                # Convert observation into a tensor and compute Q-values.
+                state = T.tensor(observation, dtype=T.float).to(self.device)
                 
-            # Convert observation into a tensor and compute Q-values.
-            state = T.tensor(observation, dtype=T.float).to(self.device)
-            qvals = self.net.qvals(state, advantages_only=True)
+                qvals = self.net.qvals(state, advantages_only=True)
 
-            # --- Debug Code Start ---
-            if debug:
-                # Log the entire Q-values tensor.
-                logging.info("DEBUG: Q-values from network: %s", qvals.cpu().numpy())
-                # Compute the best (argmax) action from the Q-values.
-                best_action = T.argmax(qvals, dim=1)
-                logging.info("DEBUG: Action chosen based on max Q: %s", best_action.cpu().numpy())
-            # --- Debug Code End ---
-            
-            # Choose action using the greedy action from the network output.
-            x = T.argmax(qvals, dim=1).cpu()
-            
-            # If in early training (or other conditions), add some randomness.
-            if self.env_steps < self.min_sampling_size or not self.noisy or (self.env_steps < self.total_frames / 2 and self.eps_disable):
-                probs = self.epsilon.eps
-                x = randomise_action_batch(x, probs, self.n_actions)
-            return x
+                # --- Debug Code Start ---
+                if debug:
+                    # Log the entire Q-values tensor.
+                    logging.info("DEBUG: Q-values from network: %s", qvals.cpu().numpy())
+                    # Compute the best (argmax) action from the Q-values.
+                    best_action = T.argmax(qvals, dim=1)
+                    logging.info("DEBUG: Action chosen based on max Q: %s", best_action.cpu().numpy())
+                # --- Debug Code End ---
+                
+                # Choose action using the greedy action from the network output.
+                x = T.argmax(qvals, dim=1).cpu()
+                
+                # If in early training (or other conditions), add some randomness.
+                if self.env_steps < self.min_sampling_size or not self.noisy or (self.env_steps < self.total_frames / 2 and self.eps_disable):
+                    probs = self.epsilon.eps
+                    x = randomise_action_batch(x, probs, self.n_actions)
+
+                return x
+        except Exception as e:
+            logging.error(f"Error in choose_action: {e}")
+            # Return random actions as fallback
+            return torch.tensor([np.random.randint(0, self.n_actions) for _ in range(observation.shape[0])])
 
     # Updated store_transition that avoids unnecessary conversions.
     def store_transition(self, state, action, reward, next_state, done, stream, prio=True):
@@ -246,6 +259,7 @@ class BTRAgent:
             state = to_numpy(state)
         if not isinstance(next_state, np.ndarray):
             next_state = to_numpy(next_state)
+
         self.memory.append(state, action, reward, next_state, done, stream, prio=prio)
         self.epsilon.update_eps()
         self.env_steps += 1
@@ -254,8 +268,18 @@ class BTRAgent:
         self.tgt_net.load_state_dict(self.net.state_dict())
 
     def save_model(self):
+        """Save the online network, mirror it to tgt_net, *and* persist ε."""
         print("Saving Models")
+
+        # 1) neural-net weights (unchanged)
         self.net.save_checkpoint(self.agent_name)
+
+        # 2) epsilon side-car
+        eps_path = self.agent_name + "_epsilon.txt"
+        with open(eps_path, "w") as f:
+            f.write(f"{self.epsilon.eps:.10f}")
+        print(f"Epsilon ({self.epsilon.eps:.6f}) written to {eps_path}")
+
         print("Models Saved")
 
     def load_models(self, name):
@@ -287,105 +311,81 @@ class BTRAgent:
             print("Updating Target Network")
             self.replace_target_network()
 
-        idxs, states, actions, rewards, next_states, dones, weights = self.memory.sample(self.batch_size)
-        # # --- Debug Code Start ---
-        # with T.no_grad():
-        #     # Compute Q-values for the states in the current training batch.
-        #     batch_qvals = self.net.qvals(states, advantages_only=True)
-        #     # Compute best actions from these Q-values.
-        #     batch_best_actions = T.argmax(batch_qvals, dim=1)
-        #     logging.info("DEBUG: Training Batch Q-values:\n%s", batch_qvals.cpu().numpy())
-        #     logging.info("DEBUG: Training Batch - Chosen actions (by max Q):\n%s", batch_best_actions.cpu().numpy())
-        # # --- Debug Code End ---
+        # Sample from buffer
+        try:
+            idxs, states, actions, rewards, next_states, dones, weights = self.memory.sample(self.batch_size)
+        except Exception as e:
+            logging.error(f"Error during sampling: {e}")
+            return
 
         self.optimizer.zero_grad()
 
-        #use this code to check your states are correct
-        # x = np.random.randint(0,200)
-        # print(dones[x])
-        # print(rewards[x])
-        # fig, axes = plt.subplots(1, 4, figsize=(12, 3))
-
-        # axes[0].imshow(states[x][0].unsqueeze(0).cpu().permute(1, 2, 0))
-        # axes[0].set_title("state first frame")
-        # axes[0].axis("off")
-
-        # axes[1].imshow(next_states[x][0].unsqueeze(0).cpu().permute(1, 2, 0))
-        # axes[1].set_title("next state first frame")
-        # axes[1].axis("off")
-
-        # axes[2].imshow(states[x][-1].unsqueeze(0).cpu().permute(1, 2, 0))
-        # axes[2].set_title("state last frame")
-        # axes[2].axis("off")
-
-        # axes[3].imshow(next_states[x][-1].unsqueeze(0).cpu().permute(1, 2, 0))
-        # axes[3].set_title("next state last frame")
-        # axes[3].axis("off")
-
-        # plt.tight_layout()
-        # plt.show()
-        
-        # plt.imshow(states[0][1].unsqueeze(dim=0).cpu().permute(1, 2, 0))
-        # plt.show()
-        
-        # plt.imshow(states[0][2].unsqueeze(dim=0).cpu().permute(1, 2, 0))
-        # plt.show()
-        
-        # plt.imshow(states[1][0].unsqueeze(dim=0).cpu().permute(1, 2, 0))
-        # plt.show()
-        
-        # plt.imshow(states[2][0].unsqueeze(dim=0).cpu().permute(1, 2, 0))
-        # plt.show()
-
-        with torch.amp.autocast(device_type=self.device):
-            if self.iqn and self.munchausen:
-                with torch.no_grad():
-                    Q_targets_next, _ = self.tgt_net(next_states)
-                    q_t_n = Q_targets_next.mean(dim=1)
-                    actions = actions.unsqueeze(1)
-                    rewards = rewards.unsqueeze(1)
-                    dones = dones.unsqueeze(1)
+        try:
+            with torch.amp.autocast(device_type=self.device):
+                if self.iqn and self.munchausen:
+                    with torch.no_grad():
+                        Q_targets_next, _ = self.tgt_net(next_states)
+                        
+                        q_t_n = Q_targets_next.mean(dim=1)
+                        
+                        # Add extra dimension for actions, rewards, dones, and weights
+                        actions = actions.unsqueeze(1)
+                        rewards = rewards.unsqueeze(1)
+                        dones = dones.unsqueeze(1)
+                        if self.per:
+                            weights = weights.unsqueeze(1)
+                                
+                        logsum = torch.logsumexp((q_t_n - q_t_n.max(1)[0].unsqueeze(-1)) / self.entropy_tau, 1).unsqueeze(-1)
+                        tau_log_pi_next = (q_t_n - q_t_n.max(1)[0].unsqueeze(-1) - self.entropy_tau * logsum).unsqueeze(1)
+                        pi_target = T.nn.functional.softmax(q_t_n / self.entropy_tau, dim=1).unsqueeze(1)
+                        
+                        Q_target = (self.gamma ** self.n * (pi_target * (Q_targets_next - tau_log_pi_next) * (~dones.unsqueeze(-1))).sum(2)).unsqueeze(1)
+                        
+                        q_k_target = self.net.qvals(states)
+                        v_k_target = q_k_target.max(1)[0].unsqueeze(-1)
+                        tau_log_pik = q_k_target - v_k_target - self.entropy_tau * torch.logsumexp((q_k_target - v_k_target) / self.entropy_tau, 1).unsqueeze(-1)
+                        
+                        munchausen_addon = tau_log_pik.gather(1, actions)
+                        
+                        munchausen_reward = (rewards + self.alpha * torch.clamp(munchausen_addon, min=self.lo, max=0)).unsqueeze(-1)
+                        
+                        Q_targets = munchausen_reward + Q_target
+                    
+                    q_k, taus = self.net(states)
+                    
+                    Q_expected = q_k.gather(2, actions.unsqueeze(-1).expand(self.batch_size, self.num_tau, 1))
+                    
+                    td_error = Q_targets - Q_expected
+                    loss_v = T.abs(td_error).sum(dim=1).mean(dim=1).data
+                    huber_l = calculate_huber_loss(td_error, 1.0, self.num_tau)
+                    quantil_l = T.abs(taus - (td_error.detach() < 0).float()) * huber_l / 1.0
+                    loss = quantil_l.sum(dim=1).mean(dim=1, keepdim=True)
                     if self.per:
-                        weights = weights.unsqueeze(1)
-                    logsum = torch.logsumexp((q_t_n - q_t_n.max(1)[0].unsqueeze(-1)) / self.entropy_tau, 1).unsqueeze(-1)
-                    tau_log_pi_next = (q_t_n - q_t_n.max(1)[0].unsqueeze(-1) - self.entropy_tau * logsum).unsqueeze(1)
-                    pi_target = T.nn.functional.softmax(q_t_n / self.entropy_tau, dim=1).unsqueeze(1)
-                    Q_target = (self.gamma ** self.n * (pi_target * (Q_targets_next - tau_log_pi_next) * (~dones.unsqueeze(-1))).sum(2)).unsqueeze(1)
-                    q_k_target = self.net.qvals(states)
-                    v_k_target = q_k_target.max(1)[0].unsqueeze(-1)
-                    tau_log_pik = q_k_target - v_k_target - self.entropy_tau * torch.logsumexp((q_k_target - v_k_target) / self.entropy_tau, 1).unsqueeze(-1)
-                    munchausen_addon = tau_log_pik.gather(1, actions)
-                    munchausen_reward = (rewards + self.alpha * torch.clamp(munchausen_addon, min=self.lo, max=0)).unsqueeze(-1)
-                    Q_targets = munchausen_reward + Q_target
-                q_k, taus = self.net(states)
-                Q_expected = q_k.gather(2, actions.unsqueeze(-1).expand(self.batch_size, self.num_tau, 1))
-                td_error = Q_targets - Q_expected
-                loss_v = T.abs(td_error).sum(dim=1).mean(dim=1).data
-                huber_l = calculate_huber_loss(td_error, 1.0, self.num_tau)
-                quantil_l = T.abs(taus - (td_error.detach() < 0).float()) * huber_l / 1.0
-                loss = quantil_l.sum(dim=1).mean(dim=1, keepdim=True)
-                if self.per:
-                    loss = loss * weights.to(self.net.device)
-                loss = loss.mean()
+                        loss = loss * weights.to(self.net.device)
+                    loss = loss.mean()
 
-        self.memory.update_priorities(idxs, loss_v.cpu().detach().numpy())
+            self.memory.update_priorities(idxs, loss_v.cpu().detach().numpy())
 
-        self.scaler.scale(loss).backward()
-        
-        self.scaler.unscale_(self.optimizer)
-        T.nn.utils.clip_grad_norm_(self.net.parameters(), self.grad_clip)
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
-        self.optimizer.zero_grad()
+            self.scaler.scale(loss).backward()
+            
+            self.scaler.unscale_(self.optimizer)
+            T.nn.utils.clip_grad_norm_(self.net.parameters(), self.grad_clip)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.optimizer.zero_grad()
 
-        self.grad_steps += 1
-        if self.grad_steps % 10000 == 0:
-            print("Completed " + str(self.grad_steps) + " gradient steps")
+            self.grad_steps += 1
+            if self.grad_steps % 10000 == 0:
+                print("Completed " + str(self.grad_steps) + " gradient steps")
+        except Exception as e:
+            logging.error(f"Error during learning: {e}")
+            import traceback
+            logging.error(traceback.format_exc())
 
-def calculate_huber_loss(td_errors, k=1.0, taus=8):
+def calculate_huber_loss(td_error, k=1.0, taus=8):
     """
     Calculate huber loss element-wisely depending on kappa k.
     """
-    loss = torch.where(td_errors.abs() <= k, 0.5 * td_errors.pow(2), k * (td_errors.abs() - 0.5 * k))
-    assert loss.shape == (td_errors.shape[0], taus, taus), "huber loss has wrong shape"
+    loss = torch.where(td_error.abs() <= k, 0.5 * td_error.pow(2), k * (td_error.abs() - 0.5 * k))
+    assert loss.shape == (td_error.shape[0], taus, taus), "huber loss has wrong shape"
     return loss

@@ -5,7 +5,6 @@ import time
 import numpy
 from math import sqrt
 
-
 # SumTree
 # a binary tree data structure where the parent’s value is the sum of its children
 class SumTree():
