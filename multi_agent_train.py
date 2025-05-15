@@ -116,7 +116,7 @@ def launch_dolphin_for_worker(worker_id):
         paths["dolphin_path"] = r"C:\Users\victo\FunkyKong\dolphin-x64-framedrawn-stable\Dolphin.exe"
         paths["script_path"] = r"C:\Users\victo\FunkyKong\Mario-Kart-Wii-AI\env_multi.py"
         paths["savestate_path"] = r"C:\Users\victo\FunkyKong\Mario-Kart-Wii-AI\funky_flame_delfino.sav"
-        paths["game_path"] = r"C:\Users\victo\FunkyKong\dolphin-x64-framedrawn-stable\MarioKart(Compress).iso"
+        paths["game_path"] = r"C:\Users\victo\MarioKart(Compress).iso"
     cmd = (
         f'"{paths["dolphin_path"]}" '
         f'-u "{user_dir}" '
