@@ -88,7 +88,7 @@ class PersistentClient:
 def launch_dolphin_for_worker(worker_id):
     port = 6000 + worker_id
     os.environ["ENV_PORT"] = str(port)
-    user = "Zach"
+    user = "Victor"
     if user == "Nolan":
         user_dir = f"C:\\Users\\nolan\\DolphinUserDirs\\instance_{worker_id}"
     elif user == "Zach":
@@ -350,7 +350,7 @@ def main():
             testing=False,
             replay_period=64,
             per_beta_anneal=True,
-            loading_checkpoint=True,
+            loading_checkpoint=False,
         )
 
         log_frequency = 1024

@@ -6,7 +6,7 @@ import numpy
 from math import sqrt
 
 # SumTree
-# a binary tree data structure where the parent’s value is the sum of its children
+# a binary tree data structure where the parent’s value is the sum of its children 
 class SumTree():
   def __init__(self, size, procgen=False):
     self.index = 0

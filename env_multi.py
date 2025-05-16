@@ -2,7 +2,7 @@ import time
 import collections
 import sys
 # Set up site–packages path.
-user = "Zach"
+user = "Victor"
 if user == "Nolan":
     sys.path.append(r"C:\Users\nolan\AppData\Local\Programs\Python\Python312\Lib\site-packages")
 elif user == "Zach":
@@ -311,6 +311,16 @@ def reset_environment(initial=False):
                 savestate.load_from_file(r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_delfino_savestate3.sav")
             elif reset_choice == 4:
                 savestate.load_from_file(r"C:\Users\nolan\OneDrive\Desktop\School\CS\Capstone\Mario-Kart-Wii-AI\funky_flame_delfino_savestate4.sav")
+        elif user == "Victor":
+            if reset_choice == 1:
+                savestate.load_from_file(r"C:\Users\victo\FunkyKong\Mario-Kart-Wii-AI\funky_flame_delfino_savestate_startv2.sav")
+            elif reset_choice == 2:
+                savestate.load_from_file(r"C:\Users\victo\FunkyKong\Mario-Kart-Wii-AI\funky_flame_delfino_savestate2.sav")
+            elif reset_choice == 3:
+                savestate.load_from_file(r"C:\Users\victo\FunkyKong\Mario-Kart-Wii-AI\funky_flame_delfino_savestate3.sav")
+            elif reset_choice == 4:
+                savestate.load_from_file(r"C:\Users\victo\FunkyKong\Mario-Kart-Wii-AI\funky_flame_delfino_savestate4.sav")
+        
 
 ##############################################################################
 # Main loop with persistent connection, asynchronous awaits, frameskip, sequential stacking,

@@ -45,7 +45,7 @@ def randomise_action_batch(x, probs, n_actions):
 def choose_eval_action(observation, eval_net, n_actions, device, rng):
     with torch.no_grad():
         state = T.tensor(observation, dtype=T.float).to(device)
-        # Handle batch dimension if not present
+        # Handle batch dimension if not present 
         if len(state.shape) == 3:  # (C, H, W)
             state = state.unsqueeze(0)  # Add batch dimension (1, C, H, W)
         qvals = eval_net.qvals(state, advantages_only=True)
